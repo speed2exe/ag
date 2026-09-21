@@ -203,49 +203,46 @@ func (ep *EventPrinter) printToolResult(resultStr string) {
 func (ep *EventPrinter) printInput(input models.Input) {
 	switch in := input.(type) {
 	case *models.InputUnknown:
-	case *models.ToolCallResult:
-		resultStr := in.Result
-		switch in.Name {
-		case consts.BashToolName:
-			var bashOutput models.BashOutput
-			if err := json.Unmarshal([]byte(in.Result), &bashOutput); err != nil {
-				log.Errorf(fmt.Sprintf("invalid bash_command output JSON: %v", err))
+	case *models.ToolCalls:
+		for _, toolCall := range in.Items {
+			resultStr := toolCall.Result
+			switch toolCall.Name {
+			case consts.BashToolName:
+				var bashOutput models.BashOutput
+				if err := json.Unmarshal([]byte(toolCall.Result), &bashOutput); err != nil {
+					log.Errorf(fmt.Sprintf("invalid bash_command output JSON: %v", err))
+					ep.printToolResult(resultStr)
+					break
+				}
+				sb := strings.Builder{}
+				if bashOutput.ExitCode != 0 {
+					sb.WriteString(printer.BgRed)
+					fmt.Fprintf(&sb, " %v ", bashOutput.ExitCode)
+					sb.WriteString(printer.Reset)
+				}
+				if bashOutput.Stderr != "" {
+					sb.WriteString(printer.ColorRed)
+					fmt.Fprintf(&sb, " %s ", bashOutput.Stderr)
+					sb.WriteString(printer.Reset)
+				}
+				sb.WriteString(bashOutput.Stdout)
+				ep.printToolResult(sb.String())
+			case consts.AgentToolName:
+				var agentOutput models.AgentOutput
+				if err := json.Unmarshal([]byte(toolCall.Result), &agentOutput); err != nil {
+					log.Errorf("invalid agent output JSON: %v", err)
+					break
+				}
+				ep.TotalInputTokens += agentOutput.TotalInputTokens
+				ep.TotalInputTokensCached += agentOutput.TotalInputTokensCached
+				ep.TotalOutputTokens += agentOutput.TotalOutputTokens
+				ep.TotalOutputTokensReasoning += agentOutput.TotalOutputTokensReasoning
+			default:
 				ep.printToolResult(resultStr)
-				break
 			}
-			sb := strings.Builder{}
-			if bashOutput.ExitCode != 0 {
-				sb.WriteString(printer.BgRed)
-				fmt.Fprintf(&sb, " %v ", bashOutput.ExitCode)
-				sb.WriteString(printer.Reset)
-			}
-			if bashOutput.Stderr != "" {
-				sb.WriteString(printer.ColorRed)
-				fmt.Fprintf(&sb, " %s ", bashOutput.Stderr)
-				sb.WriteString(printer.Reset)
-			}
-			sb.WriteString(bashOutput.Stdout)
-			ep.printToolResult(sb.String())
-		case consts.AgentToolName:
-			var agentOutput models.AgentOutput
-			if err := json.Unmarshal([]byte(in.Result), &agentOutput); err != nil {
-				log.Errorf("invalid agent output JSON: %v", err)
-				break
-			}
-			ep.TotalInputTokens += agentOutput.TotalInputTokens
-			ep.TotalInputTokensCached += agentOutput.TotalInputTokensCached
-			ep.TotalOutputTokens += agentOutput.TotalOutputTokens
-			ep.TotalOutputTokensReasoning += agentOutput.TotalOutputTokensReasoning
-		default:
-			ep.printToolResult(resultStr)
 		}
+		ep.spin()
 
-		// if there are tool calls and every tool is done
-		// results will be passed to agent and be processed again, so we need to spin the spinner again
-		ep.toolCount--
-		if ep.toolCount == 0 {
-			ep.spin()
-		}
 	default:
 		panic(fmt.Sprintf("unsupported input type: %T", input))
 	}

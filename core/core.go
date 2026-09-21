@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -101,17 +102,21 @@ func generateStream(ctx context.Context,
 			}
 
 			curEvents := util.FeedChan(model.GenerateStream(ctx, instructions, tools, messages), events)
-			toolCallExtractor := &ToolCallExtractor{}
+			toolCallExtractor := &ToolCallExtractor{toolCalls: &models.ToolCalls{}}
 			lastOutputErr := &llm.LastOutputError{}
-			util.StreamActions(curEvents, toolCallExtractor.extract, lastOutputErr.Set)
+			outputCollector := &OutputCollector{}
+			util.StreamActions(curEvents, toolCallExtractor.extract, lastOutputErr.Set, outputCollector.collect)
+
+			outputCollector.finalize()
+			messages = append(messages, outputCollector.messages...)
 
 			toolCallExtractor.finalize()
-			toolCalls := toolCallExtractor.acc
-			if len(toolCalls) == 0 {
+			toolCalls := toolCallExtractor.toolCalls
+			if len(toolCalls.Items) == 0 {
 				return
 			}
 
-			for _, toolCall := range toolCalls {
+			for _, toolCall := range toolCalls.Items {
 				// check context cancellation
 				select {
 				case <-ctx.Done():
@@ -141,9 +146,10 @@ func generateStream(ctx context.Context,
 						toolCall.Result = string(output)
 					}
 				}
-				messages = append(messages, toolCall)
-				events <- toolCall
 			}
+
+			events <- toolCalls
+			messages = append(messages, toolCalls)
 		}
 	}()
 
@@ -203,7 +209,7 @@ type ToolCallExtractor struct {
 	currentToolName string
 	currentArgs     strings.Builder
 
-	acc []*models.ToolCallResult
+	toolCalls *models.ToolCalls
 }
 
 func (t *ToolCallExtractor) extract(event models.Event) {
@@ -229,7 +235,7 @@ func (t *ToolCallExtractor) finalize() {
 			// doesn't fail and the call isn't silently dropped.
 			args = "{}"
 		}
-		t.acc = append(t.acc, &models.ToolCallResult{
+		t.toolCalls.Items = append(t.toolCalls.Items, &models.ToolCall{
 			CallId: t.currentCallId,
 			Name:   t.currentToolName,
 			Args:   args,
@@ -240,26 +246,32 @@ func (t *ToolCallExtractor) finalize() {
 	t.currentArgs.Reset()
 }
 
-// TODO: serialize and deserialize
 type ContextRecorder struct {
+	previousEvent models.Event
+
 	store    *store.CtxStore
 	messages []models.Message
 
-	outputTextAcc strings.Builder
+	outputReasoningAcc strings.Builder
+	outputTextAcc      strings.Builder
 }
 
 func (c *ContextRecorder) record(event models.Event) {
+	if reflect.TypeOf(event) != reflect.TypeOf(c.previousEvent) {
+		c.finalizeText()
+	}
+	c.previousEvent = event
+
 	switch e := event.(type) {
+	case *models.OutputReasoning:
+		c.outputReasoningAcc.WriteString(e.Reasoning)
 	case *models.OutputText:
 		c.outputTextAcc.WriteString(e.Text)
-	default:
-		c.finalizeText()
-		switch e := event.(type) {
-		case *models.OutputErr:
-			c.messages = append(c.messages, e)
-		case *models.ToolCallResult:
-			c.messages = append(c.messages, e)
-		}
+	case *models.OutputErr:
+		c.messages = append(c.messages, e)
+	case *models.ToolCalls:
+		c.messages = append(c.messages, e)
+
 	}
 }
 
@@ -268,11 +280,48 @@ func (c *ContextRecorder) finalizeText() {
 		c.messages = append(c.messages, &models.AgentResponse{Text: c.outputTextAcc.String()})
 		c.outputTextAcc.Reset()
 	}
+	if c.outputReasoningAcc.Len() > 0 {
+		c.messages = append(c.messages, &models.AgentReasoning{Reasoning: c.outputReasoningAcc.String()})
+		c.outputReasoningAcc.Reset()
+	}
 }
 
 func (c *ContextRecorder) saveToStore(ctxId string) error {
 	c.finalizeText()
 	return c.store.Save(ctxId, c.messages)
+}
+
+// extracts reasoning and output text
+type OutputCollector struct {
+	previousEvent      models.Event
+	outputReasoningAcc strings.Builder
+	outputTextAcc      strings.Builder
+
+	messages []models.Message
+}
+
+func (o *OutputCollector) collect(event models.Event) {
+	if reflect.TypeOf(event) != reflect.TypeOf(o.previousEvent) {
+		o.finalize()
+	}
+	o.previousEvent = event
+	switch e := event.(type) {
+	case *models.OutputReasoning:
+		o.outputReasoningAcc.WriteString(e.Reasoning)
+	case *models.OutputText:
+		o.outputTextAcc.WriteString(e.Text)
+	}
+}
+
+func (o *OutputCollector) finalize() {
+	if o.outputTextAcc.Len() > 0 {
+		o.messages = append(o.messages, &models.AgentResponse{Text: o.outputTextAcc.String()})
+		o.outputTextAcc.Reset()
+	}
+	if o.outputReasoningAcc.Len() > 0 {
+		o.messages = append(o.messages, &models.AgentReasoning{Reasoning: o.outputReasoningAcc.String()})
+		o.outputReasoningAcc.Reset()
+	}
 }
 
 func summarizeMessagesBeforeUserPrompt(ctx context.Context, model llm.Model, messagesBeforeUserPrompt []models.Message, listener chan<- models.Event) (*models.Summary, error) {
