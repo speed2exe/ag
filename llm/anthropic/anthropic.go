@@ -124,31 +124,32 @@ func toAnthropicMessages(ctx context.Context, msg models.Message) anthropic.Mess
 			Content: []anthropic.ContentBlockParamUnion{{OfText: &anthropic.TextBlockParam{Text: m.Err}}},
 			Role:    anthropic.MessageParamRoleAssistant,
 		}
-	case *models.ToolCallResult:
-		toolUseBlock := anthropic.ContentBlockParamUnion{
-			OfToolUse: &anthropic.ToolUseBlockParam{
-				ID:     m.CallId,
-				Input:  m.Args,
-				Name:   m.Name,
-				Caller: anthropic.ToolUseBlockParamCallerUnion{OfDirect: &anthropic.DirectCallerParam{}},
-			},
-		}
+	case *models.ToolCalls:
+		content := []anthropic.ContentBlockParamUnion{}
 
-		if toolResult, isAnTool, err := callAnTool(ctx, m.CallId, m.Name, m.Args); isAnTool {
-			if err != nil {
-				return anthropic.MessageParam{
-					Content: []anthropic.ContentBlockParamUnion{toolUseBlock, toolCallResultErrorText(m, err)},
-					Role:    anthropic.MessageParamRoleAssistant,
+		for _, tc := range m.Items {
+			content = append(content, anthropic.ContentBlockParamUnion{
+				OfToolUse: &anthropic.ToolUseBlockParam{
+					ID:     tc.CallId,
+					Input:  tc.Args,
+					Name:   tc.Name,
+					Caller: anthropic.ToolUseBlockParamCallerUnion{OfDirect: &anthropic.DirectCallerParam{}},
+				},
+			})
+
+			if toolResult, isAnTool, err := callAnTool(ctx, tc.CallId, tc.Name, tc.Args); isAnTool {
+				if err != nil {
+					content = append(content, toolCallResultErrorText(tc, err))
+				} else {
+					content = append(content, toolResult)
 				}
-			}
-			return anthropic.MessageParam{
-				Content: []anthropic.ContentBlockParamUnion{toolUseBlock, toolResult},
-				Role:    anthropic.MessageParamRoleAssistant,
+			} else {
+				content = append(content, toolCallResultText(tc))
 			}
 		}
 
 		return anthropic.MessageParam{
-			Content: []anthropic.ContentBlockParamUnion{toolUseBlock, toolCallResultText(m)},
+			Content: content,
 			Role:    anthropic.MessageParamRoleAssistant,
 		}
 	default:
@@ -190,23 +191,23 @@ func optString(s *string) param.Opt[string] {
 	return param.NewOpt(*s)
 }
 
-func toolCallResultErrorText(m *models.ToolCallResult, err error) anthropic.ContentBlockParamUnion {
+func toolCallResultErrorText(tc *models.ToolCall, err error) anthropic.ContentBlockParamUnion {
 	return anthropic.ContentBlockParamUnion{
 		OfToolResult: &anthropic.ToolResultBlockParam{
-			ToolUseID: m.CallId,
+			ToolUseID: tc.CallId,
 			Content: []anthropic.ToolResultBlockParamContentUnion{
-				{OfText: &anthropic.TextBlockParam{Text: fmt.Sprintf("Error calling tool %s: %v", m.Name, err)}},
+				{OfText: &anthropic.TextBlockParam{Text: fmt.Sprintf("Error calling tool %s: %v", tc.Name, err)}},
 			},
 		},
 	}
 }
 
-func toolCallResultText(m *models.ToolCallResult) anthropic.ContentBlockParamUnion {
+func toolCallResultText(tc *models.ToolCall) anthropic.ContentBlockParamUnion {
 	return anthropic.ContentBlockParamUnion{
 		OfToolResult: &anthropic.ToolResultBlockParam{
-			ToolUseID: m.CallId,
+			ToolUseID: tc.CallId,
 			Content: []anthropic.ToolResultBlockParamContentUnion{
-				{OfText: &anthropic.TextBlockParam{Text: m.Result}},
+				{OfText: &anthropic.TextBlockParam{Text: tc.Result}},
 			},
 		},
 	}

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/speed2exe/ag/log"
 	"github.com/speed2exe/ag/models"
 	"github.com/speed2exe/ag/setting"
 	"github.com/speed2exe/ag/tool"
@@ -42,6 +41,7 @@ func (c *Client) GenerateStream(
 	tools []*tool.Tool,
 	messages []models.Message,
 ) <-chan models.Event {
+	// TODO: add reasoning
 	input := toResponsesInput(messages)
 	openAiTools := toResponsesTools(tools)
 
@@ -63,7 +63,6 @@ func (c *Client) GenerateStream(
 
 		for stream.Next() {
 			ev := stream.Current()
-			log.Debugf("%s", ev.RawJSON())
 			switch ev.Type {
 			case "response.output_text.delta":
 				events <- &models.OutputText{Text: ev.Delta.OfString}
@@ -97,53 +96,62 @@ func (c *Client) GenerateStream(
 	return events
 }
 
+func easyMsgString(role responses.EasyInputMessageRole, text string) responses.ResponseInputItemUnionParam {
+	return responses.ResponseInputItemUnionParam{
+		OfMessage: &responses.EasyInputMessageParam{
+			Role:    role,
+			Content: responses.EasyInputMessageContentUnionParam{OfString: param.NewOpt(text)},
+		},
+	}
+}
+
 func toResponsesInput(messages []models.Message) responses.ResponseInputParam {
 	var input responses.ResponseInputParam
 	for _, msg := range messages {
-		input = append(input, convertMessage(msg)...)
+		switch m := msg.(type) {
+		case *models.ContextId:
+			panic("ContextId should not be in messages")
+		case *models.Summary:
+			input = append(input, easyMsgString(responses.EasyInputMessageRoleUser, m.Text))
+		case *models.UserPrompt:
+			input = append(input, easyMsgString(responses.EasyInputMessageRoleUser, m.Text))
+		case *models.AgentReasoning:
+			input = append(input, responses.ResponseInputItemUnionParam{
+				OfReasoning: &responses.ResponseReasoningItemParam{
+					Summary: []responses.ResponseReasoningItemSummaryParam{{Text: m.Reasoning}},
+				},
+			})
+		case *models.AgentResponse:
+			input = append(input, easyMsgString(responses.EasyInputMessageRoleAssistant, m.Text))
+		case *models.OutputErr:
+			input = append(input, easyMsgString(responses.EasyInputMessageRoleAssistant, m.Err))
+		case *models.ToolCalls:
+			for _, tc := range m.Items {
+				input = append(input,
+					responses.ResponseInputItemUnionParam{
+						OfFunctionCall: &responses.ResponseFunctionToolCallParam{
+							CallID:    tc.CallId,
+							Name:      tc.Name,
+							Arguments: tc.Args,
+						},
+					},
+				)
+			}
+			for _, tc := range m.Items {
+				input = append(input,
+					responses.ResponseInputItemUnionParam{
+						OfFunctionCallOutput: &responses.ResponseInputItemFunctionCallOutputParam{
+							CallID: tc.CallId,
+							Output: tc.Result,
+						},
+					},
+				)
+			}
+		default:
+			panic(fmt.Sprintf("unsupported message type: %T", msg))
+		}
 	}
 	return input
-}
-
-func convertMessage(msg models.Message) []responses.ResponseInputItemUnionParam {
-	easyMsg := func(role responses.EasyInputMessageRole, text string) responses.ResponseInputItemUnionParam {
-		return responses.ResponseInputItemUnionParam{
-			OfMessage: &responses.EasyInputMessageParam{
-				Role:    role,
-				Content: responses.EasyInputMessageContentUnionParam{OfString: param.NewOpt(text)},
-			},
-		}
-	}
-
-	switch m := msg.(type) {
-	case *models.ContextId:
-		return nil
-	case *models.Summary:
-		return []responses.ResponseInputItemUnionParam{easyMsg(responses.EasyInputMessageRoleUser, m.Text)}
-	case *models.UserPrompt:
-		return []responses.ResponseInputItemUnionParam{easyMsg(responses.EasyInputMessageRoleUser, m.Text)}
-	case *models.AgentResponse:
-		return []responses.ResponseInputItemUnionParam{easyMsg(responses.EasyInputMessageRoleAssistant, m.Text)}
-	case *models.OutputErr:
-		return []responses.ResponseInputItemUnionParam{easyMsg(responses.EasyInputMessageRoleAssistant, m.Err)}
-	case *models.ToolCallResult:
-		fnCall := responses.ResponseInputItemUnionParam{
-			OfFunctionCall: &responses.ResponseFunctionToolCallParam{
-				CallID:    m.CallId,
-				Name:      m.Name,
-				Arguments: m.Args,
-			},
-		}
-		fnOutput := responses.ResponseInputItemUnionParam{
-			OfFunctionCallOutput: &responses.ResponseInputItemFunctionCallOutputParam{
-				CallID: m.CallId,
-				Output: m.Result,
-			},
-		}
-		return []responses.ResponseInputItemUnionParam{fnCall, fnOutput}
-	default:
-		panic(fmt.Sprintf("unsupported message type: %T", msg))
-	}
 }
 
 func toResponsesTools(tools []*tool.Tool) []responses.ToolUnionParam {

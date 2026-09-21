@@ -51,13 +51,18 @@ func (s *CtxStore) Save(contextId string, messages []models.Message) error {
 			if err := s.writeToDiskJson(contextId, fileName, msg); err != nil {
 				return err
 			}
-		case *models.AgentResponse:
-			fileName := fmt.Sprintf("%s-agent.json", paddedIndex)
+		case *models.AgentReasoning:
+			fileName := fmt.Sprintf("%s-agent_reasoning.json", paddedIndex)
 			if err := s.writeToDiskJson(contextId, fileName, msg); err != nil {
 				return err
 			}
-		case *models.ToolCallResult:
-			fileName := fmt.Sprintf("%s-tool.json", paddedIndex)
+		case *models.AgentResponse:
+			fileName := fmt.Sprintf("%s-agent_response.json", paddedIndex)
+			if err := s.writeToDiskJson(contextId, fileName, msg); err != nil {
+				return err
+			}
+		case *models.ToolCalls:
+			fileName := fmt.Sprintf("%s-tools.json", paddedIndex)
 			if err := s.writeToDiskJson(contextId, fileName, msg); err != nil {
 				return err
 			}
@@ -151,18 +156,24 @@ func (s *CtxStore) Load(contextId string) ([]models.Message, error) {
 				return nil, fmt.Errorf("failed to unmarshal user message: %w", err)
 			}
 			messages = append(messages, &userMsg)
-		case "agent":
-			var agentMsg models.AgentResponse
-			if err := json.Unmarshal(bs, &agentMsg); err != nil {
+		case "agent_reasoning":
+			var agentReasoning models.AgentReasoning
+			if err := json.Unmarshal(bs, &agentReasoning); err != nil {
 				return nil, fmt.Errorf("failed to unmarshal agent message: %w", err)
 			}
-			messages = append(messages, &agentMsg)
-		case "tool":
-			var toolMsg models.ToolCallResult
-			if err := json.Unmarshal(bs, &toolMsg); err != nil {
+			messages = append(messages, &agentReasoning)
+		case "agent_response":
+			var agentResponse models.AgentResponse
+			if err := json.Unmarshal(bs, &agentResponse); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal agent message: %w", err)
+			}
+			messages = append(messages, &agentResponse)
+		case "tools":
+			var toolCalls models.ToolCalls
+			if err := json.Unmarshal(bs, &toolCalls); err != nil {
 				return nil, fmt.Errorf("failed to unmarshal tool message: %w", err)
 			}
-			messages = append(messages, &toolMsg)
+			messages = append(messages, &toolCalls)
 		case "error":
 			var errorMsg models.OutputErr
 			if err := json.Unmarshal(bs, &errorMsg); err != nil {

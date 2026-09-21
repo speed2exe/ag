@@ -76,15 +76,20 @@ type UserPrompt struct{ Text string }
 
 func (m *UserPrompt) isMessage() {}
 
+type AgentReasoning struct{ Reasoning string }
+
+func (m *AgentReasoning) isMessage() {}
+
 type AgentResponse struct{ Text string }
 
 func (m *AgentResponse) isMessage() {}
 
-type ToolCallResult struct{ CallId, Name, Args, Result string }
+type ToolCall struct{ CallId, Name, Args, Result string }
+type ToolCalls struct{ Items []*ToolCall }
 
-func (m *ToolCallResult) isMessage() {}
-func (m *ToolCallResult) isEvent()   {}
-func (m *ToolCallResult) isInput()   {}
+func (m *ToolCalls) isMessage() {}
+func (m *ToolCalls) isEvent()   {}
+func (m *ToolCalls) isInput()   {}
 
 type ContextId struct{ Id string }
 
