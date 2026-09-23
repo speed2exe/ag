@@ -43,6 +43,10 @@ func New(log func(msg string), s *setting.Settings) (Model, error) {
 			return nil, fmt.Errorf("failed to create openai client: %w", err)
 		}
 
+		// ensure anthropic client implements ToolCaller at compile time
+		var tc ToolCaller = c
+		_ = tc
+
 		return c, nil
 	default:
 		return nil, fmt.Errorf("unsupported llm provider: %s", s.LlmProvider)

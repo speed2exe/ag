@@ -10,6 +10,7 @@ import (
 	"github.com/speed2exe/ag/tool"
 
 	"encoding/json/v2"
+
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
 	"github.com/openai/openai-go/packages/param"
@@ -155,8 +156,11 @@ func toResponsesInput(messages []models.Message) responses.ResponseInputParam {
 }
 
 func toResponsesTools(tools []*tool.Tool) []responses.ToolUnionParam {
-	openAiTools := make([]responses.ToolUnionParam, len(tools))
-	for i, t := range tools {
+	openAiTools := make([]responses.ToolUnionParam, 0, len(tools)+len(oaiApiTools))
+	for _, t := range oaiApiTools {
+		openAiTools = append(openAiTools, t)
+	}
+	for _, t := range tools {
 		var params map[string]any
 		if err := json.Unmarshal(t.InputSchema, &params); err != nil {
 			panic(fmt.Sprintf("failed to unmarshal tool input schema for tool %s: %v", t.Name, err))
@@ -171,7 +175,7 @@ func toResponsesTools(tools []*tool.Tool) []responses.ToolUnionParam {
 		if t.Description != nil {
 			fn.OfFunction.Description = param.NewOpt(*t.Description)
 		}
-		openAiTools[i] = fn
+		openAiTools = append(openAiTools, fn)
 	}
 	return openAiTools
 }

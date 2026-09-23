@@ -22,8 +22,8 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args string) (st
 
 var (
 	anTools = []anTool{
-		loadImagesByUrl().toAnTool(),
-		loadImagesByFile().toAnTool(),
+		loadImagesByUrl().compile(),
+		loadImagesByFile().compile(),
 		// ...
 	}
 	anToolsByName = func() map[string]anTool {
@@ -62,7 +62,7 @@ type anTool struct {
 	call        func(ctx context.Context, callId, args string) (anthropic.ContentBlockParamUnion, error)
 }
 
-func (a anToolTyped[Input]) toAnTool() anTool {
+func (a anToolTyped[Input]) compile() anTool {
 	schema, err := toolInputSchemaFor[Input]()
 	if err != nil {
 		panic(fmt.Sprintf("failed to generate tool input schema for tool %s: %v", a.name, err))
