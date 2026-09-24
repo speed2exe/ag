@@ -2,29 +2,34 @@ package openai
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json/v2"
 	"fmt"
+	"mime"
+	"os"
+	"path/filepath"
 
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/packages/param"
 	"github.com/openai/openai-go/responses"
+	"github.com/speed2exe/ag/consts"
 	"github.com/speed2exe/ag/util"
 )
 
 // CallTool implements [llm.ToolCaller].
 func (c *Client) CallTool(ctx context.Context, toolName, args string) (string, bool, error) {
-	oaiTool, ok := oaiToolsByName[toolName]
+	_, ok := oaiToolsByName[toolName]
 	if !ok {
 		return "", false, nil
 	}
-	res, err := oaiTool.call(ctx, c, args)
-	return res, true, err
+	return consts.LlmInternalToolHandling, true, nil
 }
 
 type Nothing struct{}
 
 var (
 	oaiTools = []oaiTool{
+		loadLocalFile(),
 		// oaiToolTyped[Nothing, []openai.Model]{
 		// 	name:        "list_llm_models",
 		// 	description: "list all llm models supported by current openai host",
@@ -56,20 +61,20 @@ var (
 	}()
 )
 
-type oaiToolTyped[Input, Output any] struct {
+type oaiToolTyped[Input any] struct {
 	name        string
 	description string
-	call        func(ctx context.Context, c *Client, input *Input) (*Output, error)
+	call        func(ctx context.Context, input *Input) (responses.ResponseInputItemUnionParam, error)
 }
 
 type oaiTool struct {
 	name        string
 	description string
 	schema      map[string]any
-	call        func(ctx context.Context, c *Client, args string) (string, error)
+	call        func(ctx context.Context, args string) (responses.ResponseInputItemUnionParam, error)
 }
 
-func (a oaiToolTyped[Input, Output]) compile() oaiTool {
+func (a oaiToolTyped[Input]) compile() oaiTool {
 	schema, err := toolInputSchemaFor[Input]()
 	if err != nil {
 		panic(fmt.Sprintf("failed to generate tool input schema for tool %s: %v", a.name, err))
@@ -78,20 +83,16 @@ func (a oaiToolTyped[Input, Output]) compile() oaiTool {
 		name:        a.name,
 		description: a.description,
 		schema:      schema,
-		call: func(ctx context.Context, c *Client, args string) (string, error) {
+		call: func(ctx context.Context, args string) (responses.ResponseInputItemUnionParam, error) {
 			var input Input
 			if err := json.Unmarshal([]byte(args), &input); err != nil {
-				return "", fmt.Errorf("failed to unmarshal tool input for tool %s: %w", a.name, err)
+				return responses.ResponseInputItemUnionParam{}, fmt.Errorf("failed to unmarshal tool input for tool %s: %w", a.name, err)
 			}
-			out, err := a.call(ctx, c, &input)
+			out, err := a.call(ctx, &input)
 			if err != nil {
-				return "", err
+				return responses.ResponseInputItemUnionParam{}, err
 			}
-			bs, err := json.Marshal(out)
-			if err != nil {
-				return "", fmt.Errorf("failed to marshal tool output for tool %s: %w", a.name, err)
-			}
-			return string(bs), nil
+			return out, nil
 		},
 	}
 }
@@ -130,4 +131,49 @@ func (c *Client) listModels(ctx context.Context) ([]openai.Model, error) {
 	}
 
 	return res, nil
+}
+
+func loadLocalFile() oaiTool {
+	type LoadLocalFilesInput struct {
+		Paths []string `json:"paths"`
+	}
+	return oaiToolTyped[LoadLocalFilesInput]{
+		name:        "load_local_files",
+		description: "given list of file paths, loads the local files into llm context window. only use for non-text files, such as images and pdf",
+		call: func(ctx context.Context, input *LoadLocalFilesInput) (responses.ResponseInputItemUnionParam, error) {
+			var contents responses.ResponseInputMessageContentListParam
+			for _, p := range input.Paths {
+				url, err := localFileBase64EncodeUrl(p)
+				if err != nil {
+					return responses.ResponseInputItemUnionParam{}, fmt.Errorf("failed to encode local file %s: %w", p, err)
+				}
+				contents = append(contents, responses.ResponseInputContentUnionParam{
+					OfInputFile: &responses.ResponseInputFileParam{
+						FileURL: param.NewOpt(url),
+					},
+				})
+			}
+
+			return responses.ResponseInputItemUnionParam{
+				OfMessage: &responses.EasyInputMessageParam{
+					Role: responses.EasyInputMessageRoleUser,
+					Content: responses.EasyInputMessageContentUnionParam{
+						OfInputItemContentList: contents,
+					},
+				},
+			}, nil
+		},
+	}.compile()
+}
+
+func localFileBase64EncodeUrl(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to read file %s: %w", path, err)
+	}
+	mimeType := mime.TypeByExtension(filepath.Ext(path))
+	if mimeType == "" {
+		return "", fmt.Errorf("failed to determine mime type for file %s", path)
+	}
+	return "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data), nil
 }

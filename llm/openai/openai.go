@@ -43,7 +43,7 @@ func (c *Client) GenerateStream(
 	messages []models.Message,
 ) <-chan models.Event {
 	// TODO: add reasoning
-	input := toResponsesInput(messages)
+	input := toResponsesInput(ctx, messages)
 	openAiTools := toResponsesTools(tools)
 
 	params := responses.ResponseNewParams{
@@ -106,7 +106,7 @@ func easyMsgString(role responses.EasyInputMessageRole, text string) responses.R
 	}
 }
 
-func toResponsesInput(messages []models.Message) responses.ResponseInputParam {
+func toResponsesInput(ctx context.Context, messages []models.Message) responses.ResponseInputParam {
 	var input responses.ResponseInputParam
 	for _, msg := range messages {
 		switch m := msg.(type) {
@@ -127,6 +127,30 @@ func toResponsesInput(messages []models.Message) responses.ResponseInputParam {
 		case *models.OutputErr:
 			input = append(input, easyMsgString(responses.EasyInputMessageRoleAssistant, m.Err))
 		case *models.ToolCalls:
+
+			// handle llm specific tool calls
+			{
+				i := 0
+				for i < len(m.Items) {
+					tc := m.Items[i]
+					if fn, exists := oaiToolsByName[tc.Name]; exists {
+						// process
+						result, err := fn.call(ctx, tc.Args)
+						if err != nil { // if error, set result to error message and continue
+							m.Items[i].Result = fmt.Sprintf("error calling tool %s: %v", tc.Name, err)
+							continue
+						}
+						input = append(input, result)
+
+						// remove from list
+						m.Items[i] = m.Items[len(m.Items)-1]
+						m.Items = m.Items[:len(m.Items)-1]
+					} else {
+						i++
+					}
+				}
+			}
+
 			for _, tc := range m.Items {
 				input = append(input,
 					responses.ResponseInputItemUnionParam{

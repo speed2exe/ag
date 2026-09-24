@@ -93,7 +93,7 @@ func (p *Printer) Flush() {
 	}
 }
 
-func (p *Printer) LogFunc(str string) {
+func (p *Printer) Log(str string) {
 	p.Print(ColorYellow, str, Reset)
 }
 
