@@ -47,14 +47,9 @@ type Config struct {
 	MCPServers map[string]*ServerConfig `json:"mcpServers"`
 }
 
-const (
-	clientName    = "agent"
-	clientVersion = "1.0"
-)
-
 func NewMcpFromConfig(ctx context.Context, log func(string), configPaths []string) map[string][]*tool.Tool {
 	cfg := loadMcpConfig(log, configPaths)
-	impl := &mcp.Implementation{Name: clientName, Version: clientVersion}
+	impl := &mcp.Implementation{}
 
 	mu := sync.Mutex{}
 	toolsByServeName := map[string][]*tool.Tool{}
@@ -246,6 +241,7 @@ func loadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to unmarshal MCP config %q: %w", path, err)
 	}
 	for k, v := range cfg.MCPServers {
+		v.Name = k
 		v.Path = path
 		cfg.MCPServers[k] = v
 	}

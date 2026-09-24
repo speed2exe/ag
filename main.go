@@ -54,9 +54,9 @@ func mainErr(p *printer.Printer) error {
 	ctx := context.Background()
 
 	builtinToolByName := builtin.New()
-	skills := skill.New(settings, p.LogFunc)
-	mcpFromConfig := mcp.NewMcpFromConfig(ctx, p.LogFunc, settings.McpConfPaths)
-	model, err := llm.New(p.LogFunc, settings)
+	skills := skill.New(settings, p.Log)
+	mcpFromConfig := mcp.NewMcpFromConfig(ctx, p.Log, settings.McpConfPaths)
+	model, err := llm.New(p.Log, settings)
 	if err != nil {
 		return fmt.Errorf("failed to initialize LLM client: %w", err)
 	}
@@ -215,7 +215,7 @@ func buildInstructions(p *printer.Printer, settings *setting.Settings, skills *s
 	if content := loadInstructionFile(p, settings.InstructionPath); content != "" {
 		instructions = append(instructions, content)
 	}
-	if s := agentsmd.Load(p.LogFunc, "."); s != "" {
+	if s := agentsmd.Load(p.Log, "."); s != "" {
 		instructions = append(instructions, s)
 	}
 	instructions = append(instructions, skill.BuildPreloadSkillInstructions(skills.PreloadSkillByFilePath)...)
