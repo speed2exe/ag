@@ -8,12 +8,15 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"encoding/json/v2"
+
 	htmltomarkdown "github.com/JohannesKaufmann/html-to-markdown/v2"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/glamour/ansi"
 	"github.com/charmbracelet/glamour/styles"
+	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/term"
 	"github.com/speed2exe/ag/log"
 	"github.com/speed2exe/ag/tool"
@@ -34,6 +37,18 @@ func StreamActions[T any](eventStream <-chan T, actions ...func(T)) {
 			action(event)
 		}
 	}
+}
+
+func MustRenderText(termWidth int, s string) string {
+	rendered, err := RenderText(termWidth, s)
+	if err != nil {
+		panic(fmt.Sprintf("failed to render text: %v", err))
+	}
+	return rendered
+}
+
+func MustRenderCodeBlock(lang string, termWidth int, bash string) string {
+	return MustRenderText(termWidth, fmt.Sprintf("```%s\n%s\n```", lang, bash))
 }
 
 func RenderText(termWidth int, s string) (string, error) {
@@ -67,13 +82,79 @@ func RenderText(termWidth int, s string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("failed to render markdown: %w", err)
 		} else {
-			return strings.TrimSpace(rendered), nil
+			return TrimANSISpace(rendered), nil
 		}
 	}
 }
 
+// TrimANSISpace removes leading and trailing whitespace without removing ANSI
+// escape sequences that apply to the remaining content.
+func TrimANSISpace(s string) string {
+	type token struct {
+		value string
+		ansi  bool
+	}
+
+	tokens := make([]token, 0, len(s))
+	for state, rest := xansi.NormalState, s; len(rest) > 0; {
+		sequence, _, size, nextState := xansi.DecodeSequence(rest, state, nil)
+		value := string(sequence)
+		tokens = append(tokens, token{
+			value: value,
+			ansi:  isANSISequence(value),
+		})
+		state = nextState
+		rest = rest[size:]
+	}
+
+	first, last := -1, -1
+	for i, token := range tokens {
+		if !token.ansi && strings.TrimSpace(token.value) != "" {
+			if first == -1 {
+				first = i
+			}
+			last = i
+		}
+	}
+	if first == -1 {
+		return ""
+	}
+
+	var b strings.Builder
+	for i, token := range tokens {
+		if token.ansi {
+			b.WriteString(token.value)
+			continue
+		}
+		switch {
+		case i < first || i > last:
+		case i == first && i == last:
+			b.WriteString(strings.TrimSpace(token.value))
+		case i == first:
+			b.WriteString(strings.TrimLeftFunc(token.value, unicode.IsSpace))
+		case i == last:
+			b.WriteString(strings.TrimRightFunc(token.value, unicode.IsSpace))
+		default:
+			b.WriteString(token.value)
+		}
+	}
+	return b.String()
+}
+
+func isANSISequence(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	if s[0] != '\033' && (s[0] < 0x80 || s[0] > 0x9f) {
+		return false
+	}
+	return xansi.Strip(s) == ""
+}
+
 func newGlamourRenderer(termWidth int) *glamour.TermRenderer {
 	style := styles.DraculaStyleConfig
+
+	// modify all StyleBlocks
 	for _, s := range []*ansi.StyleBlock{
 		&style.Document,
 		&style.BlockQuote,
@@ -88,6 +169,7 @@ func newGlamourRenderer(termWidth int) *glamour.TermRenderer {
 		&style.H6,
 
 		&style.Code,
+		&style.CodeBlock.StyleBlock,
 
 		&style.Table.StyleBlock,
 
@@ -96,12 +178,60 @@ func newGlamourRenderer(termWidth int) *glamour.TermRenderer {
 		&style.HTMLBlock,
 		&style.HTMLSpan,
 	} {
-		s.Margin = nil
-		s.Indent = nil
-		s.IndentToken = nil
-		s.StylePrimitive.BlockPrefix = ""
-		s.StylePrimitive.BlockSuffix = ""
+		s.Margin = new(uint)
+		s.Indent = new(uint)
+		s.IndentToken = new(string)
 	}
+
+	// modify all StylePrimitives
+	for _, s := range []*ansi.StylePrimitive{
+		&style.Document.StylePrimitive,
+		&style.BlockQuote.StylePrimitive,
+		&style.Paragraph.StylePrimitive,
+		&style.List.StylePrimitive,
+
+		&style.Heading.StylePrimitive,
+		&style.H1.StylePrimitive,
+		&style.H2.StylePrimitive,
+		&style.H3.StylePrimitive,
+		&style.H4.StylePrimitive,
+		&style.H5.StylePrimitive,
+		&style.H6.StylePrimitive,
+
+		&style.Text,
+		&style.Strikethrough,
+		&style.Emph,
+		&style.Strong,
+		&style.HorizontalRule,
+
+		&style.Item,
+		&style.Enumeration,
+		&style.Task.StylePrimitive,
+
+		&style.Link,
+		&style.LinkText,
+
+		&style.Image,
+		&style.ImageText,
+
+		&style.Code.StylePrimitive,
+		&style.CodeBlock.StylePrimitive,
+
+		&style.Table.StylePrimitive,
+
+		&style.DefinitionList.StylePrimitive,
+		&style.DefinitionTerm,
+		&style.DefinitionDescription,
+
+		&style.HTMLBlock.StylePrimitive,
+		&style.HTMLSpan.StylePrimitive,
+	} {
+		s.Prefix = ""
+		s.Suffix = ""
+		s.BlockPrefix = ""
+		s.BlockSuffix = ""
+	}
+
 	r, _ := glamour.NewTermRenderer(
 		glamour.WithStyles(style),
 		glamour.WithWordWrap(termWidth),
