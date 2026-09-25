@@ -3,6 +3,7 @@ package consts
 const (
 	BashToolName  = "bash"
 	AgentToolName = "agent"
+	LuaToolName   = "lua"
 )
 
 const LlmInternalToolHandling = "(handled internally by llm)"
