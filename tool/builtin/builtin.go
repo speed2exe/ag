@@ -8,6 +8,7 @@ func New() map[string]*tool.Tool {
 	tools := []*tool.Tool{
 		Bash(),
 		Agent(),
+		Lua(),
 	}
 	toolByName := make(map[string]*tool.Tool, len(tools))
 	for _, t := range tools {

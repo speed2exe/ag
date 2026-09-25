@@ -207,6 +207,22 @@ func (ep *EventPrinter) printInput(input models.Input) {
 		for _, toolCall := range in.Items {
 			resultStr := toolCall.Result
 			switch toolCall.Name {
+			case consts.LuaToolName:
+				var luaOutput models.LuaOutput
+				if err := json.Unmarshal([]byte(toolCall.Result), &luaOutput); err != nil {
+					log.Errorf(fmt.Sprintf("invalid lua output JSON: %v", err))
+					ep.printToolResult(resultStr)
+					break
+				}
+				sb := strings.Builder{}
+				fmt.Fprintf(&sb, "%v", luaOutput.Return)
+				if luaOutput.Stderr != "" {
+					sb.WriteString(printer.ColorRed)
+					fmt.Fprintf(&sb, " %s ", luaOutput.Stderr)
+					sb.WriteString(printer.Reset)
+				}
+				sb.WriteString(luaOutput.Stdout)
+				ep.printToolResult(sb.String())
 			case consts.BashToolName:
 				var bashOutput models.BashOutput
 				if err := json.Unmarshal([]byte(toolCall.Result), &bashOutput); err != nil {

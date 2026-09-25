@@ -25,6 +25,17 @@ type AgentOutput struct {
 	Error                      *string `json:"error,omitempty"`
 }
 
+type LuaInput struct {
+	Name   string `json:"name"`
+	Script string `json:"script"`
+}
+
+type LuaOutput struct {
+	Return []string `json:"values"`
+	Stdout string   `json:"stdout"`
+	Stderr string   `json:"stderr"`
+}
+
 type Event interface{ isEvent() }
 
 type Output interface{ isOutput() }
