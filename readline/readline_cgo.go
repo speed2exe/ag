@@ -3,14 +3,7 @@
 package readline
 
 /*
-// macOS Apple Silicon: Homebrew installs under /opt/homebrew.
-// macOS Intel:         Homebrew installs under /usr/local.
-// Linux:               readline is on the standard library path.
-#cgo darwin,arm64 CFLAGS: -I/opt/homebrew/opt/readline/include
-#cgo darwin,arm64 LDFLAGS: -L/opt/homebrew/opt/readline/lib -lreadline
-#cgo darwin,amd64 CFLAGS: -I/usr/local/opt/readline/include
-#cgo darwin,amd64 LDFLAGS: -L/usr/local/opt/readline/lib -lreadline
-#cgo linux LDFLAGS: -lreadline
+#cgo pkg-config: readline
 
 #include <stdio.h>
 #include <stdlib.h>
