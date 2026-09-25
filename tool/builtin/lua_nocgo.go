@@ -1,3 +1,5 @@
+//go:build !cgo
+
 package builtin
 
 import (
@@ -10,7 +12,7 @@ import (
 	"github.com/speed2exe/ag/tool"
 	"github.com/speed2exe/ag/util"
 
-	lua "github.com/mmcdole/lunar"
+	"github.com/mmcdole/lunar"
 )
 
 func Lua() *tool.Tool {
@@ -24,19 +26,10 @@ func Lua() *tool.Tool {
 		if err != nil {
 			return nil, fmt.Errorf("failed to create Lua state: %w", err)
 		}
-		res, err := s.DoString(input.Name, input.Script)
-		if err != nil {
+		if _, err := s.DoString(input.Name, input.Script); err != nil {
 			return nil, fmt.Errorf("failed to execute Lua script: %w", err)
 		}
-
-		// Convert the result to a string representation
-		resultStrings := make([]string, len(res))
-		for i, v := range res {
-			resultStrings[i] = v.String()
-		}
-
 		return &models.LuaOutput{
-			Return: resultStrings,
 			Stdout: stdoutBuf.String(),
 			Stderr: stderrBuf.String(),
 		}, nil
@@ -44,7 +37,7 @@ func Lua() *tool.Tool {
 
 	return (&util.ToolForJsonInputOutput[models.LuaInput, models.LuaOutput]{
 		Name:        consts.LuaToolName,
-		Description: new(`Executes a Lua script. Name: name of the script. Script: Lua code to execute.`),
+		Description: new(`Executes a Lua script. Name: name of the script. Script: Lua code to execute. Returns stdout and stderr.`),
 		Call:        call,
 	}).MustCompile()
 }

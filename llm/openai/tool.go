@@ -29,7 +29,7 @@ type Nothing struct{}
 
 var (
 	oaiTools = []oaiTool{
-		loadLocalFile(),
+		// loadLocalFile(),
 		// oaiToolTyped[Nothing, []openai.Model]{
 		// 	name:        "list_llm_models",
 		// 	description: "list all llm models supported by current openai host",

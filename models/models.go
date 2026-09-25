@@ -31,9 +31,8 @@ type LuaInput struct {
 }
 
 type LuaOutput struct {
-	Return []string `json:"values"`
-	Stdout string   `json:"stdout"`
-	Stderr string   `json:"stderr"`
+	Stdout string `json:"stdout"`
+	Stderr string `json:"stderr"`
 }
 
 type Event interface{ isEvent() }

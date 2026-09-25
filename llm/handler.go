@@ -216,7 +216,6 @@ func (ep *EventPrinter) printInput(input models.Input) {
 					break
 				}
 				sb := strings.Builder{}
-				fmt.Fprintf(&sb, "%v", luaOutput.Return)
 				if luaOutput.Stderr != "" {
 					sb.WriteString(printer.ColorRed)
 					fmt.Fprintf(&sb, " %s ", luaOutput.Stderr)
