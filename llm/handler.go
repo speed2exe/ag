@@ -315,6 +315,7 @@ func (ep *EventPrinter) finishOutput(eventType OutputType) {
 			if err := json.Unmarshal(ep.bashToolCallJsonBuf.Bytes(), &input); err != nil {
 				log.Errorf("invalid bash_command input JSON: %v", err)
 			} else {
+				termWidth, _, _ := util.GetTerminalSize()
 				numLineCount := countLinesDownNoNewLine(2 + len(consts.BashToolName) + runewidth.StringWidth(ep.bashToolCallJsonBuf.String()))
 				ep.printer.PrintWithScratch(func(s *bytes.Buffer) {
 					for range numLineCount {
@@ -326,7 +327,7 @@ func (ep *EventPrinter) finishOutput(eventType OutputType) {
 					s.WriteString(printer.ColorBlue)
 					s.WriteString("$ ")
 					s.WriteString(printer.Reset)
-					s.WriteString(input.Command)
+					s.WriteString(util.MustRenderCodeBlock("bash", termWidth, input.Command))
 					s.WriteString("\n")
 				})
 			}
@@ -336,6 +337,7 @@ func (ep *EventPrinter) finishOutput(eventType OutputType) {
 			if err := json.Unmarshal(ep.luaToolCallJsonBuf.Bytes(), &input); err != nil {
 				log.Errorf("invalid lua input JSON: %v", err)
 			} else {
+				termWidth, _, _ := util.GetTerminalSize()
 				numLineCount := countLinesDownNoNewLine(2 + len(consts.LuaToolName) + runewidth.StringWidth(ep.luaToolCallJsonBuf.String()))
 				ep.printer.PrintWithScratch(func(s *bytes.Buffer) {
 					for range numLineCount {
@@ -344,12 +346,12 @@ func (ep *EventPrinter) finishOutput(eventType OutputType) {
 					}
 					s.WriteString(printer.ClearLine)
 					s.WriteString("\r")
-					s.WriteString(printer.ColorBrightPurple)
+					s.WriteString(printer.ColorPurple)
 					s.WriteString("$ ")
 					s.WriteString(input.Name)
-					s.WriteString("\n")
 					s.WriteString(printer.Reset)
-					s.WriteString(input.Script)
+					s.WriteString("\n")
+					s.WriteString(util.MustRenderCodeBlock("lua", termWidth, input.Script))
 					s.WriteString("\n")
 				})
 			}
