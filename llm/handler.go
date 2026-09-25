@@ -48,9 +48,10 @@ type EventPrinter struct {
 	terminalWidth    int
 	currentWidth     int
 
-	toolCount                  int
-	toolCallName               string
-	bashCommandToolCallJsonBuf bytes.Buffer
+	toolCount           int
+	toolCallName        string
+	bashToolCallJsonBuf bytes.Buffer
+	luaToolCallJsonBuf  bytes.Buffer
 
 	TotalInputTokens           int
 	TotalInputTokensCached     int
@@ -311,10 +312,10 @@ func (ep *EventPrinter) finishOutput(eventType OutputType) {
 		switch ep.toolCallName {
 		case consts.BashToolName:
 			var input models.BashInput
-			if err := json.Unmarshal(ep.bashCommandToolCallJsonBuf.Bytes(), &input); err != nil {
+			if err := json.Unmarshal(ep.bashToolCallJsonBuf.Bytes(), &input); err != nil {
 				log.Errorf("invalid bash_command input JSON: %v", err)
 			} else {
-				numLineCount := countLinesDownNoNewLine(2 + len(consts.BashToolName) + runewidth.StringWidth(ep.bashCommandToolCallJsonBuf.String()))
+				numLineCount := countLinesDownNoNewLine(2 + len(consts.BashToolName) + runewidth.StringWidth(ep.bashToolCallJsonBuf.String()))
 				ep.printer.PrintWithScratch(func(s *bytes.Buffer) {
 					for range numLineCount {
 						s.WriteString(printer.ClearLine)
@@ -329,7 +330,30 @@ func (ep *EventPrinter) finishOutput(eventType OutputType) {
 					s.WriteString("\n")
 				})
 			}
-			ep.bashCommandToolCallJsonBuf.Reset()
+			ep.bashToolCallJsonBuf.Reset()
+		case consts.LuaToolName:
+			var input models.LuaInput
+			if err := json.Unmarshal(ep.luaToolCallJsonBuf.Bytes(), &input); err != nil {
+				log.Errorf("invalid lua input JSON: %v", err)
+			} else {
+				numLineCount := countLinesDownNoNewLine(2 + len(consts.LuaToolName) + runewidth.StringWidth(ep.luaToolCallJsonBuf.String()))
+				ep.printer.PrintWithScratch(func(s *bytes.Buffer) {
+					for range numLineCount {
+						s.WriteString(printer.ClearLine)
+						s.WriteString(printer.Up1Line)
+					}
+					s.WriteString(printer.ClearLine)
+					s.WriteString("\r")
+					s.WriteString(printer.ColorBrightPurple)
+					s.WriteString("$ ")
+					s.WriteString(input.Name)
+					s.WriteString("\n")
+					s.WriteString(printer.Reset)
+					s.WriteString(input.Script)
+					s.WriteString("\n")
+				})
+			}
+			ep.luaToolCallJsonBuf.Reset()
 		default:
 			ep.printer.Print(printer.Reset, "\n")
 		}
@@ -395,7 +419,9 @@ func (ep *EventPrinter) processOutput(event models.Output) {
 		ep.printer.Print(printer.ColorGreen, e.Name)
 	case *models.OutputFnArgs:
 		if ep.toolCallName == consts.BashToolName {
-			ep.bashCommandToolCallJsonBuf.WriteString(e.Args)
+			ep.bashToolCallJsonBuf.WriteString(e.Args)
+		} else if ep.toolCallName == consts.LuaToolName {
+			ep.luaToolCallJsonBuf.WriteString(e.Args)
 		}
 		ep.printer.Print(e.Args)
 	case *models.OutputErr:
