@@ -33,6 +33,7 @@ type LuaInput struct {
 type LuaOutput struct {
 	Stdout string `json:"stdout"`
 	Stderr string `json:"stderr"`
+	Result any    `json:"result,omitempty"`
 }
 
 type Event interface{ isEvent() }

@@ -1,7 +1,6 @@
 package skill
 
 import (
-	"fmt"
 	"strings"
 
 	"encoding/json/v2"
@@ -49,7 +48,7 @@ func BuildSkillInstructions(ss map[string]*Skill) string {
 	b.WriteString("You have access to the following skills. ")
 	b.WriteString("To activate a skill, read the respective SKILL.md.\n")
 	bs, _ := json.Marshal(skillsList)
-	fmt.Fprintf(&b, "%s", string(bs))
+	b.Write(bs)
 	return b.String()
 }
 

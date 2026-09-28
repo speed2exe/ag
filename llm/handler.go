@@ -222,6 +222,17 @@ func (ep *EventPrinter) printInput(input models.Input) {
 					sb.WriteString(printer.Reset)
 				}
 				sb.WriteString(luaOutput.Stdout)
+				if luaOutput.Result != nil {
+					if luaOutput.Stdout != "" {
+						sb.WriteByte('\n')
+					}
+					result, err := json.Marshal(luaOutput.Result)
+					if err != nil {
+						log.Errorf("failed to marshal Lua result: %v", err)
+					} else {
+						sb.Write(result)
+					}
+				}
 				ep.printToolResult(sb.String())
 			case consts.BashToolName:
 				var bashOutput models.BashOutput

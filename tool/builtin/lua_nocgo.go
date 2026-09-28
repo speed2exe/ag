@@ -19,6 +19,10 @@ import (
 func Lua(tools []*tool.Tool) *tool.Tool {
 	tools = append([]*tool.Tool(nil), tools...)
 	call := func(ctx context.Context, input *models.LuaInput) (*models.LuaOutput, error) {
+		if err := validateLuaInput(input); err != nil {
+			return nil, err
+		}
+
 		var stdoutBuf, stderrBuf bytes.Buffer
 		s, err := lua.New(lua.Options{
 			Libraries: lua.FullLibraries(),
@@ -64,12 +68,30 @@ func Lua(tools []*tool.Tool) *tool.Tool {
 			}
 		}
 
-		if _, err := s.DoString(input.Name, input.Script); err != nil {
+		results, err := s.DoString(input.Name, input.Script)
+		if err != nil {
 			return nil, fmt.Errorf("failed to execute Lua script: %w", err)
+		}
+		var result any
+		if len(results) == 1 {
+			result, err = luaValueToJSON(results[0], nil, 0)
+			if err != nil {
+				return nil, fmt.Errorf("failed to capture Lua result: %w", err)
+			}
+		} else if len(results) > 1 {
+			values := make([]any, len(results))
+			for index, value := range results {
+				values[index], err = luaValueToJSON(value, nil, 0)
+				if err != nil {
+					return nil, fmt.Errorf("failed to capture Lua result: %w", err)
+				}
+			}
+			result = values
 		}
 		return &models.LuaOutput{
 			Stdout: stdoutBuf.String(),
 			Stderr: stderrBuf.String(),
+			Result: result,
 		}, nil
 	}
 

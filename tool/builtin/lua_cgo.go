@@ -15,6 +15,7 @@ package builtin
 #include <lualib.h>
 
 extern int ag_go_call_tool(lua_State *state, uintptr_t handle, int tool_index);
+extern int ag_go_capture_lua_result(lua_State *state, uintptr_t handle, int result_count);
 
 static int ag_lua_tool_call(lua_State *state) {
 	uintptr_t handle = (uintptr_t)lua_tointeger(state, lua_upvalueindex(2));
@@ -161,6 +162,10 @@ static int ag_lua_execute(
 		*error_message = ag_lua_error_message(state, "unknown Lua error");
 		goto cleanup;
 	}
+	if (ag_go_capture_lua_result(state, tool_handle, lua_gettop(state)) != 0) {
+		*error_message = ag_lua_error_message(state, "failed to capture Lua result");
+		goto cleanup;
+	}
 
 	*stdout_data = ag_read_file(stdout_file, stdout_size);
 	*stderr_data = ag_read_file(stderr_file, stderr_size);
@@ -202,9 +207,7 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"strings"
-	"sync"
-	"sync/atomic"
+	"runtime/cgo"
 	"unsafe"
 
 	"github.com/speed2exe/ag/consts"
@@ -216,8 +219,8 @@ import (
 func Lua(tools []*tool.Tool) *tool.Tool {
 	tools = append([]*tool.Tool(nil), tools...)
 	call := func(ctx context.Context, input *models.LuaInput) (*models.LuaOutput, error) {
-		if strings.IndexByte(input.Name, 0) >= 0 {
-			return nil, fmt.Errorf("Lua script name contains a NUL byte")
+		if err := validateLuaInput(input); err != nil {
+			return nil, err
 		}
 
 		if err := validateLuaTools(tools); err != nil {
@@ -233,9 +236,9 @@ func Lua(tools []*tool.Tool) *tool.Tool {
 		if len(toolNames) != 0 {
 			cToolNames = &toolNames[0]
 		}
-		handle := nextLuaToolExecution.Add(1)
-		luaToolExecutions.Store(handle, &luaToolExecution{ctx: ctx, tools: tools})
-		defer luaToolExecutions.Delete(handle)
+		execution := &luaToolExecution{ctx: ctx, tools: tools}
+		handle := cgo.NewHandle(execution)
+		defer handle.Delete()
 
 		name := C.CString(input.Name)
 		defer C.free(unsafe.Pointer(name))
@@ -265,6 +268,7 @@ func Lua(tools []*tool.Tool) *tool.Tool {
 		return &models.LuaOutput{
 			Stdout: C.GoStringN(stdout, C.int(stdoutSize)),
 			Stderr: C.GoStringN(stderr, C.int(stderrSize)),
+			Result: execution.result,
 		}, nil
 	}
 
@@ -276,19 +280,14 @@ func Lua(tools []*tool.Tool) *tool.Tool {
 }
 
 type luaToolExecution struct {
-	ctx   context.Context
-	tools []*tool.Tool
+	ctx    context.Context
+	tools  []*tool.Tool
+	result any
 }
 
-var (
-	luaToolExecutions    sync.Map
-	nextLuaToolExecution atomic.Uint64
-)
-
 func callLuaToolCallback(state *C.lua_State, handle uintptr, toolIndex int) C.int {
-	value, ok := luaToolExecutions.Load(uint64(handle))
-	execution, validExecution := value.(*luaToolExecution)
-	if !ok || !validExecution || toolIndex < 0 || toolIndex >= len(execution.tools) {
+	execution, ok := cgo.Handle(handle).Value().(*luaToolExecution)
+	if !ok || toolIndex < 0 || toolIndex >= len(execution.tools) {
 		pushLuaError(state, "invalid Lua tool callback")
 		return -1
 	}
@@ -312,6 +311,33 @@ func callLuaToolCallback(state *C.lua_State, handle uintptr, toolIndex int) C.in
 		return -1
 	}
 	return 1
+}
+
+func captureLuaResult(state *C.lua_State, handle uintptr, resultCount int) C.int {
+	execution, ok := cgo.Handle(handle).Value().(*luaToolExecution)
+	if !ok {
+		pushLuaError(state, "invalid Lua result callback")
+		return -1
+	}
+	if resultCount == 0 {
+		return 0
+	}
+
+	values := make([]any, int(resultCount))
+	for index := range values {
+		result, err := readLuaJSONValue(state, C.int(index-int(resultCount)), make(map[unsafe.Pointer]bool), 0)
+		if err != nil {
+			pushLuaError(state, fmt.Sprintf("failed to capture Lua result: %v", err))
+			return -1
+		}
+		values[index] = result
+	}
+	if len(values) == 1 {
+		execution.result = values[0]
+	} else {
+		execution.result = values
+	}
+	return 0
 }
 
 func pushLuaError(state *C.lua_State, message string) {
