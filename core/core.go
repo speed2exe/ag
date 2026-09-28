@@ -247,26 +247,14 @@ func (t *ToolCallExtractor) finalize() {
 }
 
 type ContextRecorder struct {
-	previousEvent models.Event
-
-	store    *store.CtxStore
-	messages []models.Message
-
-	outputReasoningAcc strings.Builder
-	outputTextAcc      strings.Builder
+	outputAccumulator outputAccumulator
+	store             *store.CtxStore
+	messages          []models.Message
 }
 
 func (c *ContextRecorder) record(event models.Event) {
-	if reflect.TypeOf(event) != reflect.TypeOf(c.previousEvent) {
-		c.finalizeText()
-	}
-	c.previousEvent = event
-
+	c.messages = append(c.messages, c.outputAccumulator.collect(event)...)
 	switch e := event.(type) {
-	case *models.OutputReasoning:
-		c.outputReasoningAcc.WriteString(e.Reasoning)
-	case *models.OutputText:
-		c.outputTextAcc.WriteString(e.Text)
 	case *models.OutputErr:
 		c.messages = append(c.messages, e)
 	case *models.ToolCalls:
@@ -276,14 +264,7 @@ func (c *ContextRecorder) record(event models.Event) {
 }
 
 func (c *ContextRecorder) finalizeText() {
-	if c.outputTextAcc.Len() > 0 {
-		c.messages = append(c.messages, &models.AgentResponse{Text: c.outputTextAcc.String()})
-		c.outputTextAcc.Reset()
-	}
-	if c.outputReasoningAcc.Len() > 0 {
-		c.messages = append(c.messages, &models.AgentReasoning{Reasoning: c.outputReasoningAcc.String()})
-		c.outputReasoningAcc.Reset()
-	}
+	c.messages = append(c.messages, c.outputAccumulator.finalize()...)
 }
 
 func (c *ContextRecorder) saveToStore(ctxId string) error {
@@ -291,37 +272,53 @@ func (c *ContextRecorder) saveToStore(ctxId string) error {
 	return c.store.Save(ctxId, c.messages)
 }
 
-// extracts reasoning and output text
-type OutputCollector struct {
+type outputAccumulator struct {
 	previousEvent      models.Event
 	outputReasoningAcc strings.Builder
 	outputTextAcc      strings.Builder
-
-	messages []models.Message
 }
 
-func (o *OutputCollector) collect(event models.Event) {
+func (o *outputAccumulator) collect(event models.Event) []models.Message {
+	var messages []models.Message
 	if reflect.TypeOf(event) != reflect.TypeOf(o.previousEvent) {
-		o.finalize()
+		messages = o.finalize()
 	}
 	o.previousEvent = event
+
 	switch e := event.(type) {
 	case *models.OutputReasoning:
 		o.outputReasoningAcc.WriteString(e.Reasoning)
 	case *models.OutputText:
 		o.outputTextAcc.WriteString(e.Text)
 	}
+	return messages
 }
 
-func (o *OutputCollector) finalize() {
+func (o *outputAccumulator) finalize() []models.Message {
+	var messages []models.Message
 	if o.outputTextAcc.Len() > 0 {
-		o.messages = append(o.messages, &models.AgentResponse{Text: o.outputTextAcc.String()})
+		messages = append(messages, &models.AgentResponse{Text: o.outputTextAcc.String()})
 		o.outputTextAcc.Reset()
 	}
 	if o.outputReasoningAcc.Len() > 0 {
-		o.messages = append(o.messages, &models.AgentReasoning{Reasoning: o.outputReasoningAcc.String()})
+		messages = append(messages, &models.AgentReasoning{Reasoning: o.outputReasoningAcc.String()})
 		o.outputReasoningAcc.Reset()
 	}
+	return messages
+}
+
+// extracts reasoning and output text
+type OutputCollector struct {
+	outputAccumulator outputAccumulator
+	messages          []models.Message
+}
+
+func (o *OutputCollector) collect(event models.Event) {
+	o.messages = append(o.messages, o.outputAccumulator.collect(event)...)
+}
+
+func (o *OutputCollector) finalize() {
+	o.messages = append(o.messages, o.outputAccumulator.finalize()...)
 }
 
 func summarizeMessagesBeforeUserPrompt(ctx context.Context, model llm.Model, messagesBeforeUserPrompt []models.Message, listener chan<- models.Event) (*models.Summary, error) {

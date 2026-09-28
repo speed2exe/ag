@@ -14,30 +14,7 @@ package builtin
 #include <lauxlib.h>
 #include <lualib.h>
 
-extern int ag_go_call_tool(lua_State *state, uintptr_t handle, int tool_index);
 extern int ag_go_capture_lua_result(lua_State *state, uintptr_t handle, int result_count);
-
-static int ag_lua_tool_call(lua_State *state) {
-	uintptr_t handle = (uintptr_t)lua_tointeger(state, lua_upvalueindex(2));
-	int tool_index = (int)lua_tointeger(state, lua_upvalueindex(1));
-	int result_count = ag_go_call_tool(state, handle, tool_index);
-	if (result_count < 0) {
-		return lua_error(state);
-	}
-	return result_count;
-}
-
-static void ag_lua_register_tool(
-	lua_State *state,
-	const char *name,
-	int tool_index,
-	uintptr_t handle
-) {
-	lua_pushinteger(state, tool_index);
-	lua_pushinteger(state, (lua_Integer)handle);
-	lua_pushcclosure(state, ag_lua_tool_call, 2);
-	lua_setglobal(state, name);
-}
 
 static lua_Number ag_lua_tonumber(lua_State *state, int index) {
 	return lua_tonumber(state, index);
@@ -106,9 +83,7 @@ static int ag_lua_execute(
 	const char *name,
 	const char *script,
 	size_t script_size,
-	const char **tool_names,
-	size_t tool_count,
-	uintptr_t tool_handle,
+	uintptr_t result_handle,
 	char **stdout_data,
 	size_t *stdout_size,
 	char **stderr_data,
@@ -150,9 +125,6 @@ static int ag_lua_execute(
 		*error_message = ag_lua_error_message(state, "failed to redirect Lua output");
 		goto cleanup;
 	}
-	for (size_t i = 0; i < tool_count; i++) {
-		ag_lua_register_tool(state, tool_names[i], (int)i, tool_handle);
-	}
 
 	status = luaL_loadbufferx(state, script, script_size, name, NULL);
 	if (status == LUA_OK) {
@@ -162,7 +134,7 @@ static int ag_lua_execute(
 		*error_message = ag_lua_error_message(state, "unknown Lua error");
 		goto cleanup;
 	}
-	if (ag_go_capture_lua_result(state, tool_handle, lua_gettop(state)) != 0) {
+	if (ag_go_capture_lua_result(state, result_handle, lua_gettop(state)) != 0) {
 		*error_message = ag_lua_error_message(state, "failed to capture Lua result");
 		goto cleanup;
 	}
@@ -216,27 +188,13 @@ import (
 	"github.com/speed2exe/ag/util"
 )
 
-func Lua(tools []*tool.Tool) *tool.Tool {
-	tools = append([]*tool.Tool(nil), tools...)
-	call := func(ctx context.Context, input *models.LuaInput) (*models.LuaOutput, error) {
+func Lua() *tool.Tool {
+	call := func(_ context.Context, input *models.LuaInput) (*models.LuaOutput, error) {
 		if err := validateLuaInput(input); err != nil {
 			return nil, err
 		}
 
-		if err := validateLuaTools(tools); err != nil {
-			return nil, err
-		}
-		toolNames := make([]*C.char, len(tools))
-		for i, currentTool := range tools {
-			toolNames[i] = C.CString(currentTool.Name)
-			defer C.free(unsafe.Pointer(toolNames[i]))
-		}
-
-		var cToolNames **C.char
-		if len(toolNames) != 0 {
-			cToolNames = &toolNames[0]
-		}
-		execution := &luaToolExecution{ctx: ctx, tools: tools}
+		execution := &luaExecution{}
 		handle := cgo.NewHandle(execution)
 		defer handle.Delete()
 
@@ -249,7 +207,6 @@ func Lua(tools []*tool.Tool) *tool.Tool {
 		var stdoutSize, stderrSize C.size_t
 		if C.ag_lua_execute(name,
 			(*C.char)(script), C.size_t(len(input.Script)),
-			cToolNames, C.size_t(len(toolNames)),
 			C.uintptr_t(handle),
 			&stdout, &stdoutSize,
 			&stderr, &stderrSize,
@@ -274,47 +231,17 @@ func Lua(tools []*tool.Tool) *tool.Tool {
 
 	return (&util.ToolForJsonInputOutput[models.LuaInput, models.LuaOutput]{
 		Name:        consts.LuaToolName,
-		Description: luaToolDescription(tools),
+		Description: luaToolDescription(),
 		Call:        call,
 	}).MustCompile()
 }
 
-type luaToolExecution struct {
-	ctx    context.Context
-	tools  []*tool.Tool
+type luaExecution struct {
 	result any
 }
 
-func callLuaToolCallback(state *C.lua_State, handle uintptr, toolIndex int) C.int {
-	execution, ok := cgo.Handle(handle).Value().(*luaToolExecution)
-	if !ok || toolIndex < 0 || toolIndex >= len(execution.tools) {
-		pushLuaError(state, "invalid Lua tool callback")
-		return -1
-	}
-	if C.lua_gettop(state) != 1 || C.lua_type(state, 1) != C.LUA_TTABLE {
-		pushLuaError(state, "tool expects one table argument")
-		return -1
-	}
-
-	args, err := readLuaJSONValue(state, 1, make(map[unsafe.Pointer]bool), 0)
-	if err != nil {
-		pushLuaError(state, err.Error())
-		return -1
-	}
-	result, err := callLuaTool(execution.ctx, execution.tools[toolIndex], args)
-	if err != nil {
-		pushLuaError(state, err.Error())
-		return -1
-	}
-	if err := pushLuaJSONValue(state, result, 0); err != nil {
-		pushLuaError(state, fmt.Sprintf("failed to decode tool result: %v", err))
-		return -1
-	}
-	return 1
-}
-
 func captureLuaResult(state *C.lua_State, handle uintptr, resultCount int) C.int {
-	execution, ok := cgo.Handle(handle).Value().(*luaToolExecution)
+	execution, ok := cgo.Handle(handle).Value().(*luaExecution)
 	if !ok {
 		pushLuaError(state, "invalid Lua result callback")
 		return -1
@@ -433,53 +360,4 @@ func readLuaJSONValue(
 	default:
 		return nil, fmt.Errorf("Lua tool arguments cannot contain %s values", C.GoString(C.lua_typename(state, C.lua_type(state, index))))
 	}
-}
-
-func pushLuaJSONValue(state *C.lua_State, value any, depth int) error {
-	if depth > 64 {
-		return fmt.Errorf("tool result exceeds maximum nesting depth")
-	}
-	switch value := value.(type) {
-	case nil:
-		C.lua_pushnil(state)
-	case bool:
-		C.lua_pushboolean(state, cBool(value))
-	case float64:
-		C.lua_pushnumber(state, C.lua_Number(value))
-	case int64:
-		C.lua_pushinteger(state, C.lua_Integer(value))
-	case string:
-		text := C.CBytes([]byte(value))
-		defer C.free(text)
-		C.lua_pushlstring(state, (*C.char)(text), C.size_t(len(value)))
-	case []any:
-		C.lua_createtable(state, C.int(len(value)), 0)
-		for i, element := range value {
-			if err := pushLuaJSONValue(state, element, depth+1); err != nil {
-				return err
-			}
-			C.lua_rawseti(state, -2, C.lua_Integer(i+1))
-		}
-	case map[string]any:
-		C.lua_createtable(state, 0, C.int(len(value)))
-		for key, element := range value {
-			keyText := C.CBytes([]byte(key))
-			C.lua_pushlstring(state, (*C.char)(keyText), C.size_t(len(key)))
-			C.free(keyText)
-			if err := pushLuaJSONValue(state, element, depth+1); err != nil {
-				return err
-			}
-			C.lua_rawset(state, -3)
-		}
-	default:
-		return fmt.Errorf("unsupported JSON value type %T", value)
-	}
-	return nil
-}
-
-func cBool(value bool) C.int {
-	if value {
-		return 1
-	}
-	return 0
 }

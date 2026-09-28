@@ -40,15 +40,21 @@ func main() {
 }
 
 func buildTools(ctx context.Context, p *printer.Printer, s *setting.Settings) map[string]*tool.Tool {
-	var luaTools []*tool.Tool
-	for _, tools := range mcp.NewMcpFromConfig(ctx, p.Log, s.McpConfPaths) {
-		luaTools = append(luaTools, tools...)
-	}
-	return map[string]*tool.Tool{
+	res := map[string]*tool.Tool{
 		consts.BashToolName:  builtin.Bash(),
 		consts.AgentToolName: builtin.Agent(),
-		consts.LuaToolName:   builtin.Lua(luaTools),
+		consts.LuaToolName:   builtin.Lua(),
 	}
+	for _, tools := range mcp.NewMcpFromConfig(ctx, p.Log, s.McpConfPaths) {
+		for _, tool := range tools {
+			if _, exists := res[tool.Name]; exists {
+				p.Print(printer.ColorYellow, fmt.Sprintf("warning: tool %s already exists, skipping\n", tool.Name), printer.Reset)
+				continue
+			}
+			res[tool.Name] = tool
+		}
+	}
+	return res
 }
 
 func mainErr(p *printer.Printer) error {
