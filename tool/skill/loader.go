@@ -18,43 +18,21 @@ import (
 // SKILL.md files. Missing or invalid paths emit warnings. Skills are keyed by
 // discovered file path, so duplicate frontmatter names may coexist.
 func LoadFromPaths(log func(s string), paths []string) map[string]*Skill {
-	var skillByFilePath = make(map[string]*Skill)
+	skillByFilePath := make(map[string]*Skill)
 	countByPath := make(map[string]int, len(paths))
 	for _, p := range paths {
 		countByPath[p] = 0
 	}
 
-	visitedPaths := make(map[string]struct{})
-	for _, root := range paths {
-		if err := filepath.WalkDir(root, func(leaf string, d fs.DirEntry, err error) error {
-			if err != nil {
-				log(fmt.Sprintf("warning: walking skill path %q: %v\n", leaf, err))
-				return nil
-			}
-
-			// Skip if we've already visited this path (handles duplicates and cycles).
-			if _, visited := visitedPaths[leaf]; visited {
-				return nil
-			} else {
-				visitedPaths[leaf] = struct{}{}
-			}
-
-			if !strings.HasSuffix(leaf, "/SKILL.md") {
-				return nil
-			}
-
-			s, err := loadSkillFile(leaf)
-			if err != nil {
-				log(fmt.Sprintf("warning: skill %q: %v\n", leaf, err))
-				return nil
-			}
-			skillByFilePath[leaf] = s
-			countByPath[root]++
-			return nil
-		}); err != nil {
-			log(fmt.Sprintf("warning: reading skill path %q: %v\n", root, err))
+	walkSkillFiles(log, paths, func(root, path string) {
+		s, err := loadSkillFile(path)
+		if err != nil {
+			log(fmt.Sprintf("warning: skill %q: %v\n", path, err))
+			return
 		}
-	}
+		skillByFilePath[path] = s
+		countByPath[root]++
+	})
 
 	for _, p := range paths {
 		log(fmt.Sprintf("loaded %d skills from %s\n", countByPath[p], p))
@@ -64,15 +42,41 @@ func LoadFromPaths(log func(s string), paths []string) map[string]*Skill {
 }
 
 func PreloadFromPaths(log func(s string), paths []string) map[string]string {
-	var skillByFilePath = make(map[string]string)
+	skillByFilePath := make(map[string]string)
 	countByPath := make(map[string]int, len(paths))
 	for _, p := range paths {
 		countByPath[p] = 0
 	}
 
+	walkSkillFiles(log, paths, func(root, path string) {
+		// load entire file content as string for preload skills
+		f, err := os.Open(path)
+		if err != nil {
+			log(fmt.Sprintf("warning: opening skill file %q: %v\n", path, err))
+			return
+		}
+		defer f.Close()
+		contents, err := io.ReadAll(f)
+		if err != nil {
+			log(fmt.Sprintf("warning: reading skill file %q: %v\n", path, err))
+			return
+		}
+
+		skillByFilePath[path] = string(contents)
+		countByPath[root]++
+	})
+
+	for _, p := range paths {
+		log(fmt.Sprintf("preloaded %d skills from %s\n", countByPath[p], p))
+	}
+
+	return skillByFilePath
+}
+
+func walkSkillFiles(log func(s string), paths []string, load func(root, path string)) {
 	visitedPaths := make(map[string]struct{})
 	for _, root := range paths {
-		if err := filepath.WalkDir(root, func(leaf string, d fs.DirEntry, err error) error {
+		if err := filepath.WalkDir(root, func(leaf string, _ fs.DirEntry, err error) error {
 			if err != nil {
 				log(fmt.Sprintf("warning: walking skill path %q: %v\n", leaf, err))
 				return nil
@@ -81,40 +85,18 @@ func PreloadFromPaths(log func(s string), paths []string) map[string]string {
 			// Skip if we've already visited this path (handles duplicates and cycles).
 			if _, visited := visitedPaths[leaf]; visited {
 				return nil
-			} else {
-				visitedPaths[leaf] = struct{}{}
 			}
+			visitedPaths[leaf] = struct{}{}
 
 			if !strings.HasSuffix(leaf, "/SKILL.md") {
 				return nil
 			}
-
-			// load entire file content as string for preload skills
-			f, err := os.Open(leaf)
-			if err != nil {
-				log(fmt.Sprintf("warning: opening skill file %q: %v\n", leaf, err))
-				return nil
-			}
-			defer f.Close()
-			contents, err := io.ReadAll(f)
-			if err != nil {
-				log(fmt.Sprintf("warning: reading skill file %q: %v\n", leaf, err))
-				return nil
-			}
-
-			skillByFilePath[leaf] = string(contents)
-			countByPath[root]++
+			load(root, leaf)
 			return nil
 		}); err != nil {
 			log(fmt.Sprintf("warning: reading skill path %q: %v\n", root, err))
 		}
 	}
-
-	for _, p := range paths {
-		log(fmt.Sprintf("preloaded %d skills from %s\n", countByPath[p], p))
-	}
-
-	return skillByFilePath
 }
 
 // loadSkillFile parses SKILL.md content according to the Agent Skills specification.
