@@ -35,44 +35,28 @@ func (s *CtxStore) Save(contextId string, messages []models.Message) error {
 
 	for i, msg := range messages {
 		paddedIndex := pad(i, nDigits)
+		var suffix string
 		switch msg.(type) {
 		case *models.Summary:
-			fileName := fmt.Sprintf("%s-summary.json", paddedIndex)
-			if err := s.writeToDiskJson(contextId, fileName, msg); err != nil {
-				return err
-			}
+			suffix = "summary"
 		case *models.ContextId:
-			fileName := fmt.Sprintf("%s-context.json", paddedIndex)
-			if err := s.writeToDiskJson(contextId, fileName, msg); err != nil {
-				return err
-			}
+			suffix = "context"
 		case *models.UserPrompt:
-			fileName := fmt.Sprintf("%s-user.json", paddedIndex)
-			if err := s.writeToDiskJson(contextId, fileName, msg); err != nil {
-				return err
-			}
+			suffix = "user"
 		case *models.AgentReasoning:
-			fileName := fmt.Sprintf("%s-agent_reasoning.json", paddedIndex)
-			if err := s.writeToDiskJson(contextId, fileName, msg); err != nil {
-				return err
-			}
+			suffix = "agent_reasoning"
 		case *models.AgentResponse:
-			fileName := fmt.Sprintf("%s-agent_response.json", paddedIndex)
-			if err := s.writeToDiskJson(contextId, fileName, msg); err != nil {
-				return err
-			}
+			suffix = "agent_response"
 		case *models.ToolCalls:
-			fileName := fmt.Sprintf("%s-tools.json", paddedIndex)
-			if err := s.writeToDiskJson(contextId, fileName, msg); err != nil {
-				return err
-			}
+			suffix = "tools"
 		case *models.OutputErr:
-			fileName := fmt.Sprintf("%s-error.json", paddedIndex)
-			if err := s.writeToDiskJson(contextId, fileName, msg); err != nil {
-				return err
-			}
+			suffix = "error"
 		default:
 			panic(fmt.Sprintf("unsupported message type: %T", msg))
+		}
+		fileName := fmt.Sprintf("%s-%s.json", paddedIndex, suffix)
+		if err := s.writeToDiskJson(contextId, fileName, msg); err != nil {
+			return err
 		}
 	}
 

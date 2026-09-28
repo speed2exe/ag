@@ -101,16 +101,12 @@ func runInteractive(
 		ctxIdBySessionKey := map[string]string{}
 		if data, err := os.ReadFile(settings.SessionPath); err != nil {
 			log.Errorf("failed to read session key file %s: %v", settings.SessionPath, err)
+		} else if err := json.Unmarshal(data, &ctxIdBySessionKey); err != nil {
+			log.Errorf("failed to unmarshal session key file %s: %v", settings.SessionPath, err)
+		} else if sessCtxId, exists := ctxIdBySessionKey[settings.SessionKey]; !exists {
+			log.Warnf("session key %s not found in session file %s", settings.SessionKey, settings.SessionPath)
 		} else {
-			if err := json.Unmarshal(data, &ctxIdBySessionKey); err != nil {
-				log.Errorf("failed to unmarshal session key file %s: %v", settings.SessionPath, err)
-			} else {
-				if sessCtxId, exists := ctxIdBySessionKey[settings.SessionKey]; !exists {
-					log.Warnf("session key %s not found in session file %s", settings.SessionKey, settings.SessionPath)
-				} else {
-					ctxId = sessCtxId
-				}
-			}
+			ctxId = sessCtxId
 		}
 
 		defer func() {
@@ -135,12 +131,10 @@ func runInteractive(
 	var historyPrompts []string
 	if hist, err := os.ReadFile(settings.HistoryFilePath); err != nil {
 		log.Warnf("failed to load history file %s: %v", settings.HistoryFilePath, err)
+	} else if err := json.Unmarshal(hist, &historyPrompts); err != nil {
+		log.Errorf("failed to unmarshal history file %s: %v", settings.HistoryFilePath, err)
 	} else {
-		if err := json.Unmarshal(hist, &historyPrompts); err != nil {
-			log.Errorf("failed to unmarshal history file %s: %v", settings.HistoryFilePath, err)
-		} else {
-			AddHistory(historyPrompts...)
-		}
+		AddHistory(historyPrompts...)
 	}
 	defer func() { // write back history prompts to file on exit
 		// keep only the last N prompts in history file to avoid it growing too large

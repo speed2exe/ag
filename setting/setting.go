@@ -197,30 +197,14 @@ func parseCliArgsAcc(acc map[string][]*string, argv []string) error {
 	}
 
 	var val *string
-	if len(argv) == 1 { // No more tokens after the key
-		appendArg(acc, key, val)
-		argv = argv[1:]
-	} else {
-		next := argv[1]
-		if len(next) > 0 && next[0] == '-' { // Next token looks like another key
-			appendArg(acc, key, val)
-			argv = argv[1:]
-		} else {
-			val = &next
-			appendArg(acc, key, val)
-			argv = argv[2:] // skip both the key and the value
-		}
+	consumed := 1
+	if len(argv) > 1 && (len(argv[1]) == 0 || argv[1][0] != '-') {
+		val = &argv[1]
+		consumed = 2
 	}
+	acc[key] = append(acc[key], val)
 
-	return parseCliArgsAcc(acc, argv)
-}
-
-func appendArg(acc map[string][]*string, key string, val *string) {
-	if values, ok := acc[key]; !ok {
-		acc[key] = []*string{val}
-	} else {
-		acc[key] = append(values, val)
-	}
+	return parseCliArgsAcc(acc, argv[consumed:])
 }
 
 type settingDef interface {
