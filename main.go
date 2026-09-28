@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/speed2exe/ag/agentsmd"
+	"github.com/speed2exe/ag/consts"
 	"github.com/speed2exe/ag/core"
 	"github.com/speed2exe/ag/llm"
 	"github.com/speed2exe/ag/log"
@@ -39,6 +39,18 @@ func main() {
 	}
 }
 
+func buildTools(ctx context.Context, p *printer.Printer, s *setting.Settings) map[string]*tool.Tool {
+	var luaTools []*tool.Tool
+	for _, tools := range mcp.NewMcpFromConfig(ctx, p.Log, s.McpConfPaths) {
+		luaTools = append(luaTools, tools...)
+	}
+	return map[string]*tool.Tool{
+		consts.BashToolName:  builtin.Bash(),
+		consts.AgentToolName: builtin.Agent(),
+		consts.LuaToolName:   builtin.Lua(luaTools),
+	}
+}
+
 func mainErr(p *printer.Printer) error {
 	settings, err := setting.Init()
 	if err != nil {
@@ -53,14 +65,13 @@ func mainErr(p *printer.Printer) error {
 
 	ctx := context.Background()
 
-	builtinToolByName := builtin.New()
-	skills := skill.New(settings, p.Log)
-	mcpFromConfig := mcp.NewMcpFromConfig(ctx, p.Log, settings.McpConfPaths)
 	model, err := llm.New(p.Log, settings)
 	if err != nil {
 		return fmt.Errorf("failed to initialize LLM client: %w", err)
 	}
-	toolsByName := buildToolMap(p, builtinToolByName, mcpFromConfig)
+	skills := skill.New(settings, p.Log)
+	toolsByName := buildTools(ctx, p, settings)
+
 	ctx = state.WithState(ctx, &state.State{
 		Printer:     p,
 		Settings:    settings,
@@ -223,29 +234,6 @@ func buildInstructions(p *printer.Printer, settings *setting.Settings, skills *s
 		instructions = append(instructions, s)
 	}
 	return instructions
-}
-
-func buildToolMap(p *printer.Printer,
-	builtinToolByName map[string]*tool.Tool,
-	mcpFromConfig map[string][]*tool.Tool,
-) map[string]*tool.Tool {
-	allTools := make(map[string]*tool.Tool)
-
-	// add builtin tools with their original names
-	maps.Copy(allTools, builtinToolByName)
-
-	// add mcp tools from config
-	for _, tools := range mcpFromConfig {
-		for _, t := range tools {
-			if _, exists := allTools[t.Name]; exists {
-				p.Print(printer.ColorYellow, fmt.Sprintf("warning: tool name conflict for %s, skipping tool from config\n", t.Name), printer.Reset)
-				continue
-			}
-			allTools[t.Name] = t
-		}
-	}
-
-	return allTools
 }
 
 func loadInstructionFile(p *printer.Printer, path string) string {
