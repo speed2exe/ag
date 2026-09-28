@@ -127,7 +127,7 @@ func generateStream(ctx context.Context,
 				tool, ok := lookupToolByName(tools, toolCall.Name)
 				if !ok {
 					if toolCaller, ok := model.(llm.ToolCaller); ok {
-						result, found, err := execLlmToolCall(ctx, toolCaller, toolCall.CallId, toolCall.Name, toolCall.Args)
+						result, found, err := execLlmToolCall(ctx, toolCaller, toolCall.Name, toolCall.Args)
 						if !found {
 							toolCall.Result = fmt.Sprintf("tool %s not found", toolCall.Name)
 						} else if err != nil {
@@ -156,7 +156,7 @@ func generateStream(ctx context.Context,
 	return events
 }
 
-func execLlmToolCall(ctx context.Context, llmToolCaller llm.ToolCaller, callId, toolName, toolArgs string) (string, bool, error) {
+func execLlmToolCall(ctx context.Context, llmToolCaller llm.ToolCaller, toolName, toolArgs string) (string, bool, error) {
 	var (
 		result string
 		found  bool

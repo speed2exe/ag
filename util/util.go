@@ -63,27 +63,24 @@ func RenderText(termWidth int, s string) (string, error) {
 		var un string
 		if err := json.Unmarshal([]byte(s), &un); err != nil {
 			return "", fmt.Errorf("failed to unmarshal JSON string: %w", err)
-		} else {
-			return RenderText(termWidth, un)
 		}
+		return RenderText(termWidth, un)
 	case '{':
 		return RenderText(termWidth, fmt.Sprintf("```json\n%s\n```", s))
 	case '<': // maybe html
 		md, err := htmltomarkdown.ConvertString(s)
 		if err != nil {
 			return "", fmt.Errorf("failed to convert HTML to markdown: %w", err)
-		} else {
-			return RenderText(termWidth, md)
 		}
+		return RenderText(termWidth, md)
 	case '\033':
 		return s, nil // already contains ANSI escape codes, assume it's already rendered
 	default:
 		rendered, err := newGlamourRenderer(termWidth).Render(s)
 		if err != nil {
 			return "", fmt.Errorf("failed to render markdown: %w", err)
-		} else {
-			return TrimANSISpace(rendered), nil
 		}
+		return TrimANSISpace(rendered), nil
 	}
 }
 

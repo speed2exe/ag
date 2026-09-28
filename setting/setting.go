@@ -52,7 +52,7 @@ var (
 	defaultLogPath                     = "./ag.log"
 	defaultInstructionPath             = homeDir + "/.ag/instruction.md"
 	defaultJwtTokenDir                 = homeDir + "/.ag/jwt"
-	defaultSesssionPath                = homeDir + "/.ag/sessions.json"
+	defaultSessionPath                 = homeDir + "/.ag/sessions.json"
 	defaultContextDir                  = homeDir + "/.ag/contexts"
 	defaultContextTtl                  = 7 * 24 * time.Hour // 7 days
 	defaultHistoryFilePath             = homeDir + "/.ag/history.json"
@@ -342,7 +342,7 @@ var allSettingDefs = []settingDef{
 		fromStr:    strFromStr,
 		fromStrArr: strFromLastArg,
 		apply:      func(s *Settings, v string) error { s.SessionPath = v; return nil },
-		defVal:     new(defaultSesssionPath),
+		defVal:     new(defaultSessionPath),
 	},
 	&flagDefImpl[string]{
 		name:       "session-key",

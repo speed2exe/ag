@@ -105,25 +105,13 @@ func toAnthropicMessages(ctx context.Context, msg models.Message) anthropic.Mess
 	case *models.ContextId:
 		panic("context id message type is not supported by Anthropic API")
 	case *models.Summary:
-		return anthropic.MessageParam{
-			Content: []anthropic.ContentBlockParamUnion{{OfText: &anthropic.TextBlockParam{Text: m.Text}}},
-			Role:    anthropic.MessageParamRoleUser,
-		}
+		return textMessage(anthropic.MessageParamRoleUser, m.Text)
 	case *models.UserPrompt:
-		return anthropic.MessageParam{
-			Content: []anthropic.ContentBlockParamUnion{{OfText: &anthropic.TextBlockParam{Text: m.Text}}},
-			Role:    anthropic.MessageParamRoleUser,
-		}
+		return textMessage(anthropic.MessageParamRoleUser, m.Text)
 	case *models.AgentResponse:
-		return anthropic.MessageParam{
-			Content: []anthropic.ContentBlockParamUnion{{OfText: &anthropic.TextBlockParam{Text: m.Text}}},
-			Role:    anthropic.MessageParamRoleAssistant,
-		}
+		return textMessage(anthropic.MessageParamRoleAssistant, m.Text)
 	case *models.OutputErr:
-		return anthropic.MessageParam{
-			Content: []anthropic.ContentBlockParamUnion{{OfText: &anthropic.TextBlockParam{Text: m.Err}}},
-			Role:    anthropic.MessageParamRoleAssistant,
-		}
+		return textMessage(anthropic.MessageParamRoleAssistant, m.Err)
 	case *models.ToolCalls:
 		content := []anthropic.ContentBlockParamUnion{}
 
@@ -154,6 +142,13 @@ func toAnthropicMessages(ctx context.Context, msg models.Message) anthropic.Mess
 		}
 	default:
 		panic(fmt.Sprintf("unsupported message type: %T", msg))
+	}
+}
+
+func textMessage(role anthropic.MessageParamRole, text string) anthropic.MessageParam {
+	return anthropic.MessageParam{
+		Content: []anthropic.ContentBlockParamUnion{{OfText: &anthropic.TextBlockParam{Text: text}}},
+		Role:    role,
 	}
 }
 
