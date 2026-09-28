@@ -8,7 +8,7 @@ import (
 )
 
 func TestLuaReturnsAllValues(t *testing.T) {
-	luaTool := Lua(nil)
+	luaTool := Lua()
 	output, err := luaTool.Call(context.Background(), []byte(`{"name":"multi-return","script":"return 1, 'two', true"}`))
 	if err != nil {
 		t.Fatalf("Lua call failed: %v", err)
@@ -27,7 +27,7 @@ func TestLuaReturnsAllValues(t *testing.T) {
 }
 
 func TestLuaSingleReturnRemainsScalar(t *testing.T) {
-	luaTool := Lua(nil)
+	luaTool := Lua()
 	output, err := luaTool.Call(context.Background(), []byte(`{"name":"single-return","script":"return 'value'"}`))
 	if err != nil {
 		t.Fatalf("Lua call failed: %v", err)
