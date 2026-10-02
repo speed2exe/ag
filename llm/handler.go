@@ -285,12 +285,6 @@ func (ep *EventPrinter) finishOutput(eventType OutputType) {
 		if err != nil {
 			log.Errorf("failed to render markdown: %v", err)
 		} else {
-			// trim trailing spaces from each line to avoid extra spaces at the end of lines
-			lines := strings.Split(rendered, "\n")
-			for i, line := range lines {
-				lines[i] = strings.TrimRightFunc(line, unicode.IsSpace)
-			}
-
 			// move the cursor up to the beginning of the text block to overwrite it with the rendered markdown
 			ep.printer.PrintWithScratch(func(s *bytes.Buffer) {
 				for range ep.textNewLineCount {
@@ -303,13 +297,7 @@ func (ep *EventPrinter) finishOutput(eventType OutputType) {
 				s.WriteString(" ")
 				s.WriteString(printer.Reset)
 				s.WriteString(" ")
-				if len(lines) > 0 {
-					s.WriteString(lines[0])
-					for _, line := range lines[1:] {
-						s.WriteString("\n")
-						s.WriteString(line)
-					}
-				}
+				s.WriteString(rendered)
 			})
 			ep.textNewLineCount = 0
 		}
