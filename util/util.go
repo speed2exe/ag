@@ -80,13 +80,19 @@ func RenderText(termWidth int, s string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("failed to render markdown: %w", err)
 		}
-		return TrimANSISpace(rendered), nil
+
+		// trim trailing spaces from each line to avoid extra spaces at the end of lines
+		lines := strings.Split(rendered, "\n")
+		for i, line := range lines {
+			lines[i] = TrimRightANSISpace(line)
+		}
+		return TrimRightANSISpace(strings.Join(lines, "\n")), nil
 	}
 }
 
-// TrimANSISpace removes leading and trailing whitespace without removing ANSI
-// escape sequences that apply to the remaining content.
-func TrimANSISpace(s string) string {
+// TrimRightANSISpace removes trailing whitespace without removing ANSI escape
+// sequences that apply to the remaining content.
+func TrimRightANSISpace(s string) string {
 	type token struct {
 		value string
 		ansi  bool
@@ -104,16 +110,13 @@ func TrimANSISpace(s string) string {
 		rest = rest[size:]
 	}
 
-	first, last := -1, -1
+	last := -1
 	for i, token := range tokens {
 		if !token.ansi && strings.TrimSpace(token.value) != "" {
-			if first == -1 {
-				first = i
-			}
 			last = i
 		}
 	}
-	if first == -1 {
+	if last == -1 {
 		return ""
 	}
 
@@ -124,11 +127,7 @@ func TrimANSISpace(s string) string {
 			continue
 		}
 		switch {
-		case i < first || i > last:
-		case i == first && i == last:
-			b.WriteString(strings.TrimSpace(token.value))
-		case i == first:
-			b.WriteString(strings.TrimLeftFunc(token.value, unicode.IsSpace))
+		case i > last:
 		case i == last:
 			b.WriteString(strings.TrimRightFunc(token.value, unicode.IsSpace))
 		default:
@@ -202,7 +201,7 @@ func newGlamourRenderer(termWidth int) *glamour.TermRenderer {
 		&style.HorizontalRule,
 
 		&style.Item,
-		&style.Enumeration,
+		// &style.Enumeration,
 		&style.Task.StylePrimitive,
 
 		&style.Link,
