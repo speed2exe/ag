@@ -2,7 +2,6 @@ package store
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"sort"
 	"strings"
@@ -93,12 +92,6 @@ func (s *CtxStore) Load(contextId string) ([]models.Message, error) {
 
 	messages := make([]models.Message, 0, len(files))
 	for _, file := range files {
-		f, err := os.Open(fmt.Sprintf("%s/%s/%s", s.dir, contextId, file.Name()))
-		if err != nil {
-			return nil, fmt.Errorf("failed to open file: %w", err)
-		}
-		defer f.Close()
-
 		// we need to determine the type of message based on the file name suffix
 		fileName := file.Name()
 		parts := strings.Split(fileName, "-")
@@ -111,7 +104,7 @@ func (s *CtxStore) Load(contextId string) ([]models.Message, error) {
 		}
 		suffix := parts[0]
 
-		bs, err := io.ReadAll(f)
+		bs, err := os.ReadFile(fmt.Sprintf("%s/%s/%s", s.dir, contextId, file.Name()))
 		if err != nil {
 			return nil, fmt.Errorf("failed to read file: %w", err)
 		}

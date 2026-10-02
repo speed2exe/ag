@@ -5,6 +5,7 @@ package printer
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"io"
 	"strings"
 	"sync"
@@ -23,13 +24,16 @@ type Printer struct {
 	indent int
 }
 
-func New(w io.Writer) *Printer {
+func New(ctx context.Context, w io.Writer) *Printer {
 	p := &Printer{output: bufio.NewWriter(w)}
 	go func() {
-		ticker := time.NewTicker(177 * time.Millisecond)
-		defer ticker.Stop()
-		for range ticker.C {
-			p.Flush()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(177 * time.Millisecond):
+				p.Flush()
+			}
 		}
 	}()
 	return p
