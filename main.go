@@ -30,34 +30,17 @@ import (
 )
 
 func main() {
-	p := printer.New(os.Stdout)
+	ctx := context.Background()
+	p := printer.New(ctx, os.Stdout)
 	defer p.Flush()
-	if err := mainErr(p); err != nil {
+	if err := mainErr(ctx, p); err != nil {
 		p.Print(printer.ColorRed, err.Error(), "\n", printer.Reset)
 		p.Flush()
 		os.Exit(1)
 	}
 }
 
-func buildTools(ctx context.Context, p *printer.Printer, s *setting.Settings) map[string]*tool.Tool {
-	res := map[string]*tool.Tool{
-		consts.BashToolName:  builtin.Bash(),
-		consts.AgentToolName: builtin.Agent(),
-		consts.LuaToolName:   builtin.Lua(),
-	}
-	for _, tools := range mcp.NewMcpFromConfig(ctx, p.Log, s.McpConfPaths) {
-		for _, tool := range tools {
-			if _, exists := res[tool.Name]; exists {
-				p.Print(printer.ColorYellow, fmt.Sprintf("warning: tool %s already exists, skipping\n", tool.Name), printer.Reset)
-				continue
-			}
-			res[tool.Name] = tool
-		}
-	}
-	return res
-}
-
-func mainErr(p *printer.Printer) error {
+func mainErr(ctx context.Context, p *printer.Printer) error {
 	settings, err := setting.Init()
 	if err != nil {
 		return fmt.Errorf("failed to parse arguments: %w. \nUse -h/--help for usage", err)
@@ -68,8 +51,6 @@ func mainErr(p *printer.Printer) error {
 	if err := log.Init(logFilePath(settings)); err != nil {
 		return fmt.Errorf("failed to initialize log: %w", err)
 	}
-
-	ctx := context.Background()
 
 	model, err := llm.New(p.Log, settings)
 	if err != nil {
@@ -94,6 +75,24 @@ func mainErr(p *printer.Printer) error {
 		processPrompt(ctx, p, llm.NewEventPrinter(p), model, toolsByName, instructions, settings.ContextId, settings.UserInput.String())
 	}
 	return nil
+}
+
+func buildTools(ctx context.Context, p *printer.Printer, s *setting.Settings) map[string]*tool.Tool {
+	res := map[string]*tool.Tool{
+		consts.BashToolName:  builtin.Bash(),
+		consts.AgentToolName: builtin.Agent(),
+		consts.LuaToolName:   builtin.Lua(),
+	}
+	for _, tools := range mcp.NewMcpFromConfig(ctx, p.Log, s.McpConfPaths) {
+		for _, tool := range tools {
+			if _, exists := res[tool.Name]; exists {
+				p.Print(printer.ColorYellow, fmt.Sprintf("warning: tool %s already exists, skipping\n", tool.Name), printer.Reset)
+				continue
+			}
+			res[tool.Name] = tool
+		}
+	}
+	return res
 }
 
 func runInteractive(
@@ -239,7 +238,7 @@ func buildInstructions(p *printer.Printer, settings *setting.Settings, skills *s
 func loadInstructionFile(p *printer.Printer, path string) string {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		log.Warnf("load instructions from %s error: %w", path, err)
+		log.Warnf("load instructions from %s error: %s", path, err.Error())
 		return ""
 	}
 	p.Print(printer.ColorYellow, fmt.Sprintf("loaded %s\n", path), printer.Reset)
