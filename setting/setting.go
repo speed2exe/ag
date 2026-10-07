@@ -56,9 +56,9 @@ var (
 	defaultContextDir                  = homeDir + "/.ag/contexts"
 	defaultContextTtl                  = 7 * 24 * time.Hour // 7 days
 	defaultHistoryFilePath             = homeDir + "/.ag/history.json"
-	defaultMaxHistoryCount             = 100
-	defaultMaxMessagesBeforeUserPrompt = 17
-	defaultMaxMessagesAfterUserPrompt  = 29
+	defaultMaxHistoryCount             = 128
+	defaultMaxMessagesBeforeUserPrompt = 32
+	defaultMaxMessagesAfterUserPrompt  = 64
 )
 
 type Settings struct {
