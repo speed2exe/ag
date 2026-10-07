@@ -51,7 +51,6 @@ var (
 	}()
 	defaultLogPath                     = "./ag.log"
 	defaultInstructionPath             = homeDir + "/.ag/instruction.md"
-	defaultJwtTokenDir                 = homeDir + "/.ag/jwt"
 	defaultSessionPath                 = homeDir + "/.ag/sessions.json"
 	defaultContextDir                  = homeDir + "/.ag/contexts"
 	defaultContextTtl                  = 7 * 24 * time.Hour // 7 days
@@ -63,7 +62,6 @@ var (
 
 type Settings struct {
 	LogFilePath                 string
-	JwtTokenDir                 string
 	LoggingEnabled              bool
 	SkillPaths                  []string
 	PreloadSkillPaths           []string
@@ -316,15 +314,6 @@ var allSettingDefs = []settingDef{
 		fromStr:    strFromStr,
 		fromStrArr: strFromLastArg,
 		apply:      func(s *Settings, v string) error { s.LogFilePath = v; return nil },
-	},
-	&flagDefImpl[string]{
-		name:       "jwt-token-dir",
-		env:        new("AG_JWT_TOKEN_DIR"),
-		defVal:     new(defaultJwtTokenDir),
-		desc:       "Directory that stores JWT Tokens",
-		fromStr:    strFromStr,
-		fromStrArr: strFromLastArg,
-		apply:      func(s *Settings, v string) error { s.JwtTokenDir = v; return nil },
 	},
 	&flagDefImpl[bool]{
 		name:       "logging-enabled",

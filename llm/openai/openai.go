@@ -138,6 +138,7 @@ func toResponsesInput(ctx context.Context, messages []models.Message) responses.
 						result, err := fn.call(ctx, tc.Args)
 						if err != nil { // if error, set result to error message and continue
 							m.Items[i].Result = fmt.Sprintf("error calling tool %s: %v", tc.Name, err)
+							i++
 							continue
 						}
 						input = append(input, result)

@@ -33,13 +33,9 @@ func (c *Client) GenerateStream(
 	ctx context.Context,
 	instructions []string,
 	tools []*tool.Tool,
-	messages []models.Message,
+	msgs []models.Message,
 ) <-chan models.Event {
-	anMessages := make([]anthropic.MessageParam, len(messages))
-	for i, msg := range messages {
-		anMessages[i] = toAnthropicMessages(ctx, msg)
-	}
-
+	anMessages := toAnthropicMessages(ctx, msgs)
 	anTools, err := toAnthropicTools(tools)
 	if err != nil {
 		panic(fmt.Errorf("failed to convert tools for Anthropic: %w", err))
@@ -100,48 +96,58 @@ func (c *Client) GenerateStream(
 	return events
 }
 
-func toAnthropicMessages(ctx context.Context, msg models.Message) anthropic.MessageParam {
-	switch m := msg.(type) {
-	case *models.ContextId:
-		panic("context id message type is not supported by Anthropic API")
-	case *models.Summary:
-		return textMessage(anthropic.MessageParamRoleUser, m.Text)
-	case *models.UserPrompt:
-		return textMessage(anthropic.MessageParamRoleUser, m.Text)
-	case *models.AgentResponse:
-		return textMessage(anthropic.MessageParamRoleAssistant, m.Text)
-	case *models.OutputErr:
-		return textMessage(anthropic.MessageParamRoleAssistant, m.Err)
-	case *models.ToolCalls:
-		content := []anthropic.ContentBlockParamUnion{}
+func toAnthropicMessages(ctx context.Context, msgs []models.Message) []anthropic.MessageParam {
+	res := make([]anthropic.MessageParam, 0, len(msgs))
+	for _, msg := range msgs {
 
-		for _, tc := range m.Items {
-			content = append(content, anthropic.ContentBlockParamUnion{
+		switch m := msg.(type) {
+		case *models.ContextId:
+			panic("context id message type is not supported by Anthropic API")
+		case *models.Summary:
+			res = append(res, textMessage(anthropic.MessageParamRoleUser, m.Text))
+		case *models.UserPrompt:
+			res = append(res, textMessage(anthropic.MessageParamRoleUser, m.Text))
+		case *models.AgentResponse:
+			res = append(res, textMessage(anthropic.MessageParamRoleAssistant, m.Text))
+		case *models.OutputErr:
+			res = append(res, textMessage(anthropic.MessageParamRoleAssistant, m.Err))
+		case *models.ToolCalls:
+			for _, tc := range m.Items {
+				res = append(res, toolCallMessageParam(tc)...)
+			}
+		default:
+			panic(fmt.Sprintf("unsupported message type: %T", msg))
+		}
+
+	}
+
+	return res
+}
+
+func toolCallMessageParam(tc *models.ToolCall) []anthropic.MessageParam {
+	return []anthropic.MessageParam{
+		{
+			Content: []anthropic.ContentBlockParamUnion{{
 				OfToolUse: &anthropic.ToolUseBlockParam{
 					ID:     tc.CallId,
 					Input:  tc.Args,
 					Name:   tc.Name,
 					Caller: anthropic.ToolUseBlockParamCallerUnion{OfDirect: &anthropic.DirectCallerParam{}},
 				},
-			})
-
-			if toolResult, isAnTool, err := callAnTool(ctx, tc.CallId, tc.Name, tc.Args); isAnTool {
-				if err != nil {
-					content = append(content, toolCallResultErrorText(tc, err))
-				} else {
-					content = append(content, toolResult)
-				}
-			} else {
-				content = append(content, toolCallResultText(tc))
-			}
-		}
-
-		return anthropic.MessageParam{
-			Content: content,
-			Role:    anthropic.MessageParamRoleAssistant,
-		}
-	default:
-		panic(fmt.Sprintf("unsupported message type: %T", msg))
+			}},
+			Role: anthropic.MessageParamRoleAssistant,
+		},
+		{
+			Content: []anthropic.ContentBlockParamUnion{{
+				OfToolResult: &anthropic.ToolResultBlockParam{
+					ToolUseID: tc.CallId,
+					Content: []anthropic.ToolResultBlockParamContentUnion{
+						{OfText: &anthropic.TextBlockParam{Text: tc.Result}},
+					},
+				},
+			}},
+			Role: anthropic.MessageParamRoleAssistant,
+		},
 	}
 }
 
