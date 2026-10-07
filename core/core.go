@@ -45,7 +45,7 @@ func GenerateStream(ctx context.Context,
 				state.Printer.Print(printer.ColorRed, fmt.Sprintf("failed to summarize messages: %v", err), printer.Reset)
 				// only take the last MaxMessagesBeforeUserPrompt messages and use them as context
 				contextRecorder.messages = messages[len(messages)-state.Settings.MaxMessagesBeforeUserPrompt:]
-				messages = messages[len(messages)-16:]
+				messages = messages[len(messages)-state.Settings.MaxMessagesBeforeUserPrompt:]
 			} else {
 				contextRecorder.messages = []models.Message{summary}
 				// replace messages with summary

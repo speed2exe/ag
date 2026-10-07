@@ -161,11 +161,10 @@ func convertGoSDKTool(session *mcp.ClientSession, cfg *ServerConfig, mt *mcp.Too
 	}
 	desc := mt.Description
 	return &tool.Tool{
-		Name:            fmt.Sprintf("%s_%s", cfg.Name, mt.Name),
-		Description:     &desc,
-		InputSchema:     schema,
-		LuaOutputAsText: true,
-		Call:            sessionCallFunc(session, mt.Name),
+		Name:        fmt.Sprintf("%s_%s", cfg.Name, mt.Name),
+		Description: &desc,
+		InputSchema: schema,
+		Call:        sessionCallFunc(session, mt.Name),
 	}, nil
 }
 

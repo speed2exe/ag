@@ -17,38 +17,35 @@ import (
 // Each path may be a SKILL.md file or a directory searched recursively for
 // SKILL.md files. Missing or invalid paths emit warnings. Skills are keyed by
 // discovered file path, so duplicate frontmatter names may coexist.
-func LoadFromPaths(log func(s string), paths []string) map[string]*Skill {
+func LoadFromPaths(log func(s string), roots []string) map[string]*Skill {
 	skillByFilePath := make(map[string]*Skill)
-	countByPath := make(map[string]int, len(paths))
-	for _, p := range paths {
-		countByPath[p] = 0
-	}
+	countByRoot := make(map[string]int, len(roots))
 
-	walkSkillFiles(log, paths, func(root, path string) {
+	walkSkillFiles(log, roots, func(root, path string) {
 		s, err := loadSkillFile(path)
 		if err != nil {
 			log(fmt.Sprintf("warning: skill %q: %v\n", path, err))
 			return
 		}
 		skillByFilePath[path] = s
-		countByPath[root]++
+		countByRoot[root]++
 	})
 
-	for _, p := range paths {
-		log(fmt.Sprintf("loaded %d skills from %s\n", countByPath[p], p))
+	for _, p := range roots {
+		log(fmt.Sprintf("loaded %d skills from %s\n", countByRoot[p], p))
 	}
 
 	return skillByFilePath
 }
 
-func PreloadFromPaths(log func(s string), paths []string) map[string]string {
+func PreloadFromPaths(log func(s string), roots []string) map[string]string {
 	skillByFilePath := make(map[string]string)
-	countByPath := make(map[string]int, len(paths))
-	for _, p := range paths {
-		countByPath[p] = 0
+	countByRoot := make(map[string]int, len(roots))
+	for _, p := range roots {
+		countByRoot[p] = 0
 	}
 
-	walkSkillFiles(log, paths, func(root, path string) {
+	walkSkillFiles(log, roots, func(root, path string) {
 		// load entire file content as string for preload skills
 		f, err := os.Open(path)
 		if err != nil {
@@ -63,19 +60,19 @@ func PreloadFromPaths(log func(s string), paths []string) map[string]string {
 		}
 
 		skillByFilePath[path] = string(contents)
-		countByPath[root]++
+		countByRoot[root]++
 	})
 
-	for _, p := range paths {
-		log(fmt.Sprintf("preloaded %d skills from %s\n", countByPath[p], p))
+	for _, p := range roots {
+		log(fmt.Sprintf("preloaded %d skills from %s\n", countByRoot[p], p))
 	}
 
 	return skillByFilePath
 }
 
-func walkSkillFiles(log func(s string), paths []string, load func(root, path string)) {
+func walkSkillFiles(log func(s string), roots []string, load func(root, path string)) {
 	visitedPaths := make(map[string]struct{})
-	for _, root := range paths {
+	for _, root := range roots {
 		if err := filepath.WalkDir(root, func(leaf string, _ fs.DirEntry, err error) error {
 			if err != nil {
 				log(fmt.Sprintf("warning: walking skill path %q: %v\n", leaf, err))
