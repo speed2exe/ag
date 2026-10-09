@@ -219,12 +219,12 @@ type settingDef interface {
 type usageFlag struct {
 	longName        string
 	shortName       *string
+	envName         *string
 	expectsValue    bool
 	description     string
-	defaultValue    any
+	defaultValue    string
 	hasDefaultValue bool
 	required        bool
-	example         string
 }
 
 type flagDefImpl[T any] struct {
@@ -559,14 +559,26 @@ func (f *flagDefImpl[T]) usageFlag() usageFlag {
 	var zero T
 	_, isBool := any(zero).(bool)
 
-	return usageFlag{
+	flag := usageFlag{
 		longName:     f.name,
 		shortName:    f.short,
+		envName:      f.env,
 		expectsValue: !isBool,
 		description:  f.desc,
-		required:     f.defVal == nil && f.env == nil,
+		// An environment variable is an alternative way of supplying the
+		// value, not a fallback for it, so only a default value can make a
+		// setting optional. This mirrors the check in initSettings.
+		required: f.defVal == nil,
 	}
 
+	if f.defVal != nil {
+		if rendered, ok := formatDefaultValue(*f.defVal); ok {
+			flag.defaultValue = rendered
+			flag.hasDefaultValue = true
+		}
+	}
+
+	return flag
 }
 
 func printHelp() {
@@ -600,12 +612,13 @@ func printFlagHelp(output io.Writer, flag usageFlag) {
 	fmt.Fprintf(output, "  %s\n", flagLabel(flag))
 	fmt.Fprintf(output, "      %s\n", flag.description)
 	if flag.hasDefaultValue {
-		fmt.Fprintf(output, "      default: %s\n", formatDefaultValue(flag.defaultValue))
+		fmt.Fprintf(output, "      default: %s\n", flag.defaultValue)
 	} else if flag.required {
-		fmt.Fprintln(output, "      required: yes")
-	}
-	if flag.example != "" {
-		fmt.Fprintf(output, "      example: %s\n", flag.example)
+		envHelpText := ""
+		if flag.envName != nil {
+			envHelpText = fmt.Sprintf(" (or set %s)", *flag.envName)
+		}
+		fmt.Fprintf(output, "      required: yes%s\n", envHelpText)
 	}
 	fmt.Fprintln(output)
 }
@@ -621,20 +634,24 @@ func flagLabel(flag usageFlag) string {
 	return label
 }
 
-func formatDefaultValue(value any) string {
+// formatDefaultValue renders a default value for the help output. The second
+// return value reports whether the value is worth showing: several optional
+// settings use a zero defVal (`new("")`, `&[]string{}`) merely to mark
+// themselves as not required, and the zero value carries no information.
+func formatDefaultValue(value any) (string, bool) {
 	switch v := value.(type) {
 	case string:
-		if v == "" {
-			return "(empty)"
-		}
-		return v
+		return v, v != ""
 	case []string:
-		if len(v) == 0 {
-			return "(empty)"
-		}
-		return strings.Join(v, ", ")
+		return strings.Join(v, ", "), len(v) > 0
+	case time.Duration:
+		return v.String(), v != 0
+	case bool:
+		// For a boolean flag, false is a meaningful value ("disabled"), not
+		// a sign of a missing default.
+		return strconv.FormatBool(v), true
 	default:
-		return fmt.Sprint(v)
+		return fmt.Sprint(v), true
 	}
 }
 

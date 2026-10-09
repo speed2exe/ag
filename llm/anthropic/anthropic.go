@@ -48,7 +48,7 @@ func (c *Client) GenerateStream(
 		Model:    c.model,
 		Tools:    anTools,
 
-		MaxTokens: int64(128 * 1024), // 128k tokens
+		MaxTokens: int64(128 * 1024), // 128k tokens, based on https://platform.claude.com/docs/en/models/overview
 		Thinking: anthropic.ThinkingConfigParamUnion{
 			OfEnabled: &anthropic.ThinkingConfigEnabledParam{
 				BudgetTokens: int64(math.MaxInt32),
