@@ -48,8 +48,9 @@ func GenerateStream(ctx context.Context,
 				messages = messages[len(messages)-state.Settings.MaxMessagesBeforeUserPrompt:]
 			} else {
 				contextRecorder.messages = []models.Message{summary}
-				// replace messages with summary
-				messages = append(messages[:0], summary)
+				// replace messages with summary, add last message (assistant response) to the end of the messages slice
+				// this is to ensure that the last assistant response is not lost when summarizing, case when assistant asked a question
+				messages = append(messages[:0], summary, messages[len(messages)-1])
 			}
 		} else if ctxId != "" {
 			contextRecorder.messages = []models.Message{&models.ContextId{Id: ctxId}}
