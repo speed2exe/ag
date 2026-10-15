@@ -200,9 +200,9 @@ func newGlamourRenderer(termWidth int) *glamour.TermRenderer {
 		&style.Strong,
 		&style.HorizontalRule,
 
-		&style.Item,
+		// &style.Item,
 		// &style.Enumeration,
-		&style.Task.StylePrimitive,
+		// &style.Task.StylePrimitive,
 
 		&style.Link,
 		&style.LinkText,
@@ -215,9 +215,9 @@ func newGlamourRenderer(termWidth int) *glamour.TermRenderer {
 
 		&style.Table.StylePrimitive,
 
-		&style.DefinitionList.StylePrimitive,
-		&style.DefinitionTerm,
-		&style.DefinitionDescription,
+		// &style.DefinitionList.StylePrimitive,
+		// &style.DefinitionTerm,
+		// &style.DefinitionDescription,
 
 		&style.HTMLBlock.StylePrimitive,
 		&style.HTMLSpan.StylePrimitive,
