@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"encoding/json/v2"
 
@@ -90,110 +91,349 @@ func RenderText(termWidth int, s string) (string, error) {
 	}
 }
 
-// ansiToken is a single unit of an ANSI-decorated string: either printable
-// text or an ANSI escape sequence.
-type ansiToken struct {
-	value string
-	ansi  bool
-}
-
-// tokenizeANSI splits s into printable text runs and ANSI escape sequences.
-func tokenizeANSI(s string) []ansiToken {
-	tokens := make([]ansiToken, 0, len(s))
-	for state, rest := xansi.NormalState, s; len(rest) > 0; {
-		sequence, _, size, nextState := xansi.DecodeSequence(rest, state, nil)
-		value := string(sequence)
-		tokens = append(tokens, ansiToken{
-			value: value,
-			ansi:  isANSISequence(value),
-		})
-		state = nextState
-		rest = rest[size:]
-	}
-	return tokens
-}
-
-// TrimRightANSISpace removes trailing whitespace without removing ANSI escape
-// sequences that apply to the remaining content.
-func TrimRightANSISpace(s string) string {
-	tokens := tokenizeANSI(s)
-
-	last := -1
-	for i, token := range tokens {
-		if !token.ansi && strings.TrimSpace(token.value) != "" {
-			last = i
-		}
-	}
-	if last == -1 {
-		return ""
-	}
-
-	var b strings.Builder
-	for i, token := range tokens {
-		if token.ansi {
-			b.WriteString(token.value)
-			continue
-		}
-		switch {
-		case i > last:
-		case i == last:
-			b.WriteString(strings.TrimRightFunc(token.value, unicode.IsSpace))
-		default:
-			b.WriteString(token.value)
-		}
-	}
-	return b.String()
+// TrimANSISpace removes leading and trailing whitespace without removing ANSI
+// escape sequences that apply to the remaining content.
+func TrimANSISpace(s string) string {
+	return trimANSISpace(s, true, true)
 }
 
 // TrimLeftANSISpace removes leading whitespace without removing ANSI escape
 // sequences that apply to the remaining content.
 func TrimLeftANSISpace(s string) string {
-	tokens := tokenizeANSI(s)
+	return trimANSISpace(s, true, false)
+}
 
-	first := -1
-	for i, token := range tokens {
-		if !token.ansi && strings.TrimSpace(token.value) != "" {
-			first = i
-			break
+// TrimRightANSISpace removes trailing whitespace without removing ANSI escape
+// sequences that apply to the remaining content.
+func TrimRightANSISpace(s string) string {
+	return trimANSISpace(s, false, true)
+}
+
+// trimANSISpace trims whitespace from the requested sides of s. Whitespace is
+// found by scanning runes, so escape sequences are never mistaken for text, and
+// the escape sequences surrounding the trimmed whitespace are kept.
+func trimANSISpace(s string, left, right bool) string {
+	if !hasANSI(s) {
+		switch {
+		case left && right:
+			return strings.TrimSpace(s)
+		case left:
+			return strings.TrimLeftFunc(s, unicode.IsSpace)
+		default:
+			return strings.TrimRightFunc(s, unicode.IsSpace)
 		}
 	}
-	if first == -1 {
-		return ""
+
+	// Find the content: the run of non-space text from the first to the last
+	// chunk, ignoring escape sequences. Anything trimmed off is recorded so that
+	// a rewrite only happens when it is actually needed.
+	var (
+		first, last        = -1, 0 // content bounds in bytes
+		leadText, leadANSI bool    // whitespace and escapes before the content
+		tailText, tailANSI bool    // whitespace and escapes after the content
+	)
+	for i := 0; i < len(s); {
+		// Plain ASCII is the common case and is always a chunk of its own.
+		if c := s[i]; c < utf8.RuneSelf && c != '\x1b' {
+			if c == ' ' || c >= '\t' && c <= '\r' {
+				if first < 0 {
+					leadText = true
+				} else {
+					tailText = true
+				}
+			} else {
+				if first < 0 {
+					first = i
+				}
+				last = i + 1
+				tailText, tailANSI = false, false
+			}
+			i++
+			continue
+		}
+		size, kind := nextChunk(s[i:])
+		switch {
+		case kind == chunkANSI:
+			if first < 0 {
+				leadANSI = true
+			} else {
+				tailANSI = true
+			}
+		case kind == chunkSpace:
+			if first < 0 {
+				leadText = true
+			} else {
+				tailText = true
+			}
+		default:
+			if first < 0 {
+				first = i
+			}
+			last = i + size
+			tailText, tailANSI = false, false
+		}
+		i += size
+	}
+	if first < 0 {
+		return "" // no content, only whitespace and escape sequences
+	}
+
+	start, end := 0, len(s)
+	trimLeftANSI := left && leadText && leadANSI
+	if left && leadText {
+		start = first
+	}
+	trimRightANSI := right && tailText && tailANSI
+	if right && tailText {
+		end = last
+	}
+
+	switch {
+	case start == 0 && end == len(s):
+		return s // nothing to trim
+	case !trimLeftANSI && !trimRightANSI:
+		return s[start:end] // the content is contiguous
 	}
 
 	var b strings.Builder
-	for i, token := range tokens {
-		if token.ansi {
-			b.WriteString(token.value)
-			continue
-		}
-		switch {
-		case i < first:
-		case i == first:
-			b.WriteString(strings.TrimLeftFunc(token.value, unicode.IsSpace))
-		default:
-			b.WriteString(token.value)
-		}
+	b.Grow(len(s))
+	if trimLeftANSI {
+		writeANSISequences(&b, s[:start])
+	}
+	b.WriteString(s[start:end])
+	if trimRightANSI {
+		writeANSISequences(&b, s[end:])
 	}
 	return b.String()
 }
 
-// TrimANSISpace removes leading and trailing whitespace without removing ANSI
-// escape sequences that apply to the remaining content.
-func TrimANSISpace(s string) string {
-	return TrimLeftANSISpace(TrimRightANSISpace(s))
-}
+// ansiC1Introducers are the C1 bytes that can begin an ANSI escape sequence,
+// without the ESC byte that begins the others.
+const ansiC1Introducers = "\x90\x98\x9b\x9d\x9e\x9f"
 
-func isANSISequence(s string) bool {
-	if len(s) == 0 {
+// hasANSI reports whether s contains a byte that can begin an ANSI escape
+// sequence. Bytes in the C1 range also appear inside multi-byte UTF-8 text, so a
+// false positive only costs a slower path.
+func hasANSI(s string) bool {
+	// A byte loop is fastest over the prefix that decides most calls: rendered
+	// text starts its first escape sequence within a few bytes.
+	const inline = 16
+	for i := 0; i < min(len(s), inline); i++ {
+		if c := s[i]; c == '\x1b' || c >= 0x80 && c <= 0x9f {
+			return true
+		}
+	}
+	if len(s) <= inline {
 		return false
 	}
-	if s[0] != '\033' && (s[0] < 0x80 || s[0] > 0x9f) {
-		return false
+	// The rest of a longer string is better off in the vectorised byte search of
+	// the strings package, which is several times faster than a byte loop.
+	if strings.IndexByte(s, '\x1b') >= 0 {
+		return true
 	}
-	return xansi.Strip(s) == ""
+	for i := 0; i < len(ansiC1Introducers); i++ {
+		if strings.IndexByte(s, ansiC1Introducers[i]) >= 0 {
+			return true
+		}
+	}
+	return false
 }
 
+// chunkKind classifies a chunk of a string that may contain ANSI escape
+// sequences.
+type chunkKind int
+
+const (
+	chunkText  chunkKind = iota // printable text
+	chunkSpace                  // whitespace text
+	chunkANSI                   // ANSI escape sequence
+)
+
+// ansiSequenceLen returns the length in bytes of the ANSI escape sequence at the
+// start of s, or zero if s does not start with one. Only the bytes that
+// [xansi.DecodeSequence] treats as sequence introducers count: other C1 bytes
+// are passed through as opaque control bytes.
+//
+// A sequence that is malformed or unterminated extends to the end of s. Trimming
+// bytes out from under it would change how the remaining bytes are parsed, so
+// nothing after it is trimmed.
+func ansiSequenceLen(s string) int {
+	if !isANSIStart(s[0]) {
+		return 0
+	}
+	if n, ok := commonSequenceLen(s); ok {
+		return n
+	}
+	_, _, n, state := xansi.DecodeSequence(s, xansi.NormalState, nil)
+	switch {
+	case n <= 0:
+		// A decoder that makes no progress would loop forever on invalid input.
+		return 1
+	case state != xansi.NormalState, introducerOnly(s[:n]), !terminatesSequence(s[:n]):
+		return len(s)
+	}
+	return n
+}
+
+// commonSequenceLen returns the length of the well-formed escape sequence at the
+// start of s and whether it could handle it. It covers the sequences that
+// rendered text is made of, which [xansi.DecodeSequence] spends much more time
+// on: control sequences, string sequences, and two byte escape sequences.
+func commonSequenceLen(s string) (int, bool) {
+	switch s[0] {
+	case '\x1b':
+		if len(s) < 2 {
+			return 0, false
+		}
+		if n, ok := sequenceAfterESC(s[1:]); ok {
+			return n + 1, true
+		}
+	case 0x90, 0x98, 0x9d, 0x9e, 0x9f: // C1 DCS, SOS, OSC, PM, APC
+		if n, ok := stringSequenceLen(s[1:]); ok {
+			return n + 1, true
+		}
+	case 0x9b: // C1 CSI
+		if n := controlSequenceLen(s[1:]); n > 0 {
+			return n + 1, true
+		}
+	}
+	return 0, false
+}
+
+// sequenceAfterESC returns the length of the well-formed escape sequence that
+// follows the ESC at the start of s, which it does not include, and whether it
+// could handle it.
+func sequenceAfterESC(s string) (int, bool) {
+	switch c := s[0]; {
+	case c == '[': // CSI
+		if n := controlSequenceLen(s[1:]); n > 0 {
+			return n + 1, true
+		}
+	case c == 'P', c == ']', c == 'X', c == '^', c == '_': // DCS, OSC, SOS, PM, APC
+		if n, ok := stringSequenceLen(s[1:]); ok {
+			return n + 1, true
+		}
+	case c >= 0x30 && c <= 0x7e: // two byte escape sequence
+		return 1, true
+	}
+	return 0, false
+}
+
+// controlSequenceLen returns the length of the control sequence at the start of
+// s, which starts just after the CSI introducer, or zero if it is malformed.
+func controlSequenceLen(s string) int {
+	i := 0
+	for ; i < len(s) && s[i] >= '<' && s[i] <= '?'; i++ { // parameter prefixes
+	}
+	for ; i < len(s) && (s[i] >= '0' && s[i] <= '9' || s[i] == ';' || s[i] == ':'); i++ { // parameters
+	}
+	for ; i < len(s) && s[i] >= ' ' && s[i] <= '/'; i++ { // intermediates
+	}
+	if i < len(s) && s[i] >= '@' && s[i] <= '~' { // final byte
+		return i + 1
+	}
+	return 0
+}
+
+// stringSequenceLen returns the length of the terminated string sequence at the
+// start of s, which starts just after its introducer.
+func stringSequenceLen(s string) (int, bool) {
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case 0x07, 0x9c: // BEL, ST
+			return i + 1, true
+		case 0x18, 0x1a: // CAN, SUB cancel the sequence
+			return i, true
+		case '\x1b':
+			if i+1 < len(s) && s[i+1] == '\\' { // ST
+				return i + 2, true
+			}
+			return i, true // an ESC that does not start an ST cancels the sequence
+		}
+	}
+	return 0, false
+}
+
+// terminatesSequence reports whether b ends with a byte that ends an escape
+// sequence: a final byte, or one of the control characters that terminate a
+// string sequence.
+func terminatesSequence(b string) bool {
+	c := b[len(b)-1]
+	return c >= 0x40 && c <= 0x7e || // final byte of an escape or control sequence
+		c == 0x07 || c == 0x18 || c == 0x1a || c == 0x9c // BEL, CAN, SUB, ST
+}
+
+// introducerOnly reports whether b is nothing but the introducer of a control or
+// string sequence: ESC, any intermediate bytes, and the letter that opens a CSI,
+// DCS, OSC, SOS, PM or APC. The decoder reports such a prefix as complete when an
+// invalid byte follows it, but the sequence it opens has not started yet.
+func introducerOnly(b string) bool {
+	if b[0] != '\x1b' {
+		return false
+	}
+	i := 1
+	for i < len(b) && b[i] >= ' ' && b[i] <= '/' { // intermediates
+		i++
+	}
+	if i+1 != len(b) {
+		return false
+	}
+	switch b[i] {
+	case '[', 'P', ']', 'X', '^', '_': // CSI, DCS, OSC, SOS, PM, APC
+		return true
+	}
+	return false
+}
+
+// nextChunk returns the length in bytes of the chunk at the start of s, which
+// must not be empty, and what kind of chunk it is. An escape sequence is always
+// taken whole and a rune is never split, so a byte that belongs to a multi-byte
+// rune can never be mistaken for the start of an escape sequence.
+func nextChunk(s string) (size int, kind chunkKind) {
+	c := s[0]
+	if c < utf8.RuneSelf && c != '\x1b' {
+		// Plain ASCII is always a chunk of its own and cannot be part of an
+		// escape sequence.
+		if c == ' ' || c >= '\t' && c <= '\r' {
+			return 1, chunkSpace
+		}
+		return 1, chunkText
+	}
+	if isANSIStart(c) {
+		return ansiSequenceLen(s), chunkANSI
+	}
+	if r, size := utf8.DecodeRuneInString(s); r != utf8.RuneError || size > 1 {
+		if unicode.IsSpace(r) {
+			return size, chunkSpace
+		}
+		return size, chunkText
+	}
+	// Invalid UTF-8: a single byte, which is never whitespace. Grouping it with
+	// the bytes that follow would make the parse depend on whether the whitespace
+	// before it was trimmed, which would break idempotence.
+	return 1, chunkText
+}
+
+// isANSIStart reports whether c can begin an ANSI escape sequence.
+func isANSIStart(c byte) bool {
+	switch c {
+	case '\x1b', 0x90, 0x98, 0x9b, 0x9d, 0x9e, 0x9f: // ESC, DCS, SOS, CSI, OSC, PM, APC
+		return true
+	}
+	return false
+}
+
+// writeANSISequences writes the ANSI escape sequences of s to b, dropping
+// everything else.
+func writeANSISequences(b *strings.Builder, s string) {
+	for i := 0; i < len(s); {
+		size, kind := nextChunk(s[i:])
+		if kind == chunkANSI {
+			b.WriteString(s[i : i+size])
+		}
+		i += size
+	}
+}
 func newGlamourRenderer(termWidth int) *glamour.TermRenderer {
 	style := styles.DraculaStyleConfig
 

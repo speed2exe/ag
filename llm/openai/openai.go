@@ -108,6 +108,9 @@ func easyMsgString(role responses.EasyInputMessageRole, text string) responses.R
 
 func toResponsesInput(ctx context.Context, messages []models.Message) responses.ResponseInputParam {
 	var input responses.ResponseInputParam
+	// The Responses API rejects the whole request when a call_id shows up more
+	// than once, so only the first occurrence of a tool call is sent.
+	seenCallIds := make(map[string]struct{})
 	for _, msg := range messages {
 		switch m := msg.(type) {
 		case *models.ContextId:
@@ -152,7 +155,17 @@ func toResponsesInput(ctx context.Context, messages []models.Message) responses.
 				}
 			}
 
+			callItems := make([]*models.ToolCall, 0, len(m.Items))
 			for _, tc := range m.Items {
+				if tc.CallId != "" {
+					if _, seen := seenCallIds[tc.CallId]; seen {
+						continue
+					}
+					seenCallIds[tc.CallId] = struct{}{}
+				}
+				callItems = append(callItems, tc)
+			}
+			for _, tc := range callItems {
 				input = append(input,
 					responses.ResponseInputItemUnionParam{
 						OfFunctionCall: &responses.ResponseFunctionToolCallParam{
@@ -163,7 +176,7 @@ func toResponsesInput(ctx context.Context, messages []models.Message) responses.
 					},
 				)
 			}
-			for _, tc := range m.Items {
+			for _, tc := range callItems {
 				input = append(input,
 					responses.ResponseInputItemUnionParam{
 						OfFunctionCallOutput: &responses.ResponseInputItemFunctionCallOutputParam{

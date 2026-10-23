@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/speed2exe/ag/consts"
@@ -43,21 +44,24 @@ func GenerateStream(ctx context.Context,
 			summary, err := summarizeMessagesBeforeUserPrompt(ctx, model, messages, events)
 			if err != nil {
 				state.Printer.Print(printer.ColorRed, fmt.Sprintf("failed to summarize messages: %v", err), printer.Reset)
-				// only take the last MaxMessagesBeforeUserPrompt messages and use them as context
-				contextRecorder.messages = messages[len(messages)-state.Settings.MaxMessagesBeforeUserPrompt:]
-				messages = messages[len(messages)-state.Settings.MaxMessagesBeforeUserPrompt:]
+				// only take the last MaxMessagesBeforeUserPrompt messages and use them as context.
+				// the recorder and the model both keep mutating their own messages, so
+				// they must never share a backing array.
+				trimmed := messages[len(messages)-state.Settings.MaxMessagesBeforeUserPrompt:]
+				contextRecorder.setMessages(slices.Clone(trimmed))
+				messages = slices.Clone(trimmed)
 			} else {
-				contextRecorder.messages = []models.Message{summary}
+				contextRecorder.setMessages([]models.Message{summary})
 				// replace messages with summary, add last message (assistant response) to the end of the messages slice
 				// this is to ensure that the last assistant response is not lost when summarizing, case when assistant asked a question
-				messages = append(messages[:0], summary, messages[len(messages)-1])
+				messages = append(make([]models.Message, 0, 2), summary, messages[len(messages)-1])
 			}
 		} else if ctxId != "" {
-			contextRecorder.messages = []models.Message{&models.ContextId{Id: ctxId}}
+			contextRecorder.setMessages([]models.Message{&models.ContextId{Id: ctxId}})
 		}
 
 		// lastly, add in current user prompt
-		contextRecorder.messages = append(contextRecorder.messages, userPrompt)
+		contextRecorder.append(userPrompt)
 		messages = append(messages, userPrompt)
 
 		innerEvents := util.FeedChan(generateStream(ctx, model, tools, instructions, messages, contextRecorder), events)
@@ -97,8 +101,11 @@ func generateStream(ctx context.Context,
 				if err != nil {
 					state.Printer.Print(printer.ColorRed, fmt.Sprintf("failed to summarize messages: %v", err), printer.Reset)
 				} else {
+					// the context recorder appends to its own messages from another
+					// goroutine, so it must not share a backing array with the
+					// messages that are sent to the model.
 					messages = summary
-					contextRecorder.messages = summary
+					contextRecorder.setMessages(slices.Clone(summary))
 				}
 			}
 
@@ -247,14 +254,36 @@ func (t *ToolCallExtractor) finalize() {
 	t.currentArgs.Reset()
 }
 
+// ContextRecorder records the messages of a conversation so that they can be
+// used as context in later turns. It is written to from two goroutines: the one
+// consuming the event stream (record/append) and the one driving the model
+// (setMessages, when the messages are summarized and compacted), so messages is
+// guarded by mu.
 type ContextRecorder struct {
 	outputAccumulator outputAccumulator
 	store             *store.CtxStore
+	mu                sync.Mutex
 	messages          []models.Message
 }
 
+func (c *ContextRecorder) setMessages(messages []models.Message) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.messages = messages
+}
+
+func (c *ContextRecorder) append(messages ...models.Message) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.messages = append(c.messages, messages...)
+}
+
 func (c *ContextRecorder) record(event models.Event) {
-	c.messages = append(c.messages, c.outputAccumulator.collect(event)...)
+	// the accumulator is only touched by the event stream goroutine
+	collected := c.outputAccumulator.collect(event)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.messages = append(c.messages, collected...)
 	switch e := event.(type) {
 	case *models.OutputErr:
 		c.messages = append(c.messages, e)
@@ -264,13 +293,13 @@ func (c *ContextRecorder) record(event models.Event) {
 	}
 }
 
-func (c *ContextRecorder) finalizeText() {
-	c.messages = append(c.messages, c.outputAccumulator.finalize()...)
-}
-
 func (c *ContextRecorder) saveToStore(ctxId string) error {
-	c.finalizeText()
-	return c.store.Save(ctxId, c.messages)
+	// the accumulator is only touched by the event stream goroutine
+	c.mu.Lock()
+	c.messages = append(c.messages, c.outputAccumulator.finalize()...)
+	messages := slices.Clone(c.messages)
+	c.mu.Unlock()
+	return c.store.Save(ctxId, messages)
 }
 
 type outputAccumulator struct {
@@ -331,7 +360,7 @@ func summarizeMessagesBeforeUserPrompt(ctx context.Context, model llm.Model, mes
 
 	summary, err := summarizeMessagesWithPrompt(ctx, model, messagesBeforeUserPrompt, consts.SummarizerBeforeLastUserPrompt, listener)
 	if err != nil {
-		return nil, fmt.Errorf("failed to summarize messages: %v", err)
+		return nil, err
 	}
 	return summary, nil
 }
@@ -357,13 +386,24 @@ func summarizeMessagesAfterUserPrompt(ctx context.Context, model llm.Model, allM
 
 	summary, err := summarizeMessagesWithPrompt(ctx, model, allMessages, consts.SummarizerAfterLastUserPrompt, listener)
 	if err != nil {
-		return nil, fmt.Errorf("failed to summarize messages: %v", err)
+		return nil, err
 	}
-	return append(allMessages[:lastUserPromptIndex+1], summary), nil
+	// build a fresh slice: appending to allMessages[:lastUserPromptIndex+1] would
+	// write into the caller's backing array, which is still being mutated by the
+	// context recorder goroutine.
+	messages := make([]models.Message, 0, lastUserPromptIndex+2)
+	messages = append(messages, allMessages[:lastUserPromptIndex+1]...)
+	messages = append(messages, summary)
+	return messages, nil
 }
 
 func summarizeMessagesWithPrompt(ctx context.Context, model llm.Model, messages []models.Message, summaryPrompt string, listener chan<- models.Event) (*models.Summary, error) {
-	summaryEvents := model.GenerateStream(ctx, nil, nil, append(messages, &models.UserPrompt{Text: summaryPrompt}))
+	// copy the messages before appending the summarization prompt, otherwise the
+	// prompt is written into the caller's backing array (beyond its length).
+	request := make([]models.Message, 0, len(messages)+1)
+	request = append(request, messages...)
+	request = append(request, &models.UserPrompt{Text: summaryPrompt})
+	summaryEvents := model.GenerateStream(ctx, nil, nil, request)
 	var sb strings.Builder
 	for e := range summaryEvents {
 		switch ev := e.(type) {
