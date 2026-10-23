@@ -39,7 +39,7 @@ func Bash() *tool.Tool {
 
 	return (&util.ToolForJsonInputOutput[models.BashInput, models.BashOutput]{
 		Name:        consts.BashToolName,
-		Description: new(`Runs a bash command (bash -c <cmd>)`),
+		Description: new(`Runs a bash command (bash -c <cmd>). Please use a timeout to limit execution time. Returns stdout, stderr, and exit code.`),
 		Call:        call,
 	}).MustCompile()
 }
