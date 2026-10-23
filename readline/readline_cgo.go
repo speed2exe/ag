@@ -53,51 +53,20 @@ static void restore_sigint_handler(void) {
 	sigaction(SIGINT, &old_sigint_action, NULL);
 }
 
-// use_tty_streams points readline's input/output streams directly at the
-// controlling terminal instead of the process's stdin/stdout. This is
-// required when stdin has been redirected (e.g. `echo prompt | agent -i`):
-// without it, readline would read from the pipe, consume the piped bytes as
-// a single line, and then hit EOF forever afterwards instead of falling back
-// to the keyboard. Returns 0 on success, -1 if /dev/tty could not be opened.
-static inline int use_tty_streams(void) {
-	FILE *tty_in = fopen("/dev/tty", "r");
-	if (tty_in == NULL) {
-		return -1;
-	}
-	FILE *tty_out = fopen("/dev/tty", "w");
-	if (tty_out == NULL) {
-		fclose(tty_in);
-		return -1;
-	}
-
-	rl_instream = tty_in;
-	rl_outstream = tty_out;
-	return 0;
-}
 */
 import "C"
 
 import (
 	"io"
-	"os"
 	"unsafe"
-
-	"golang.org/x/term"
 )
 
-// If stdin has been piped/redirected (e.g. `echo prompt | agent -i`), point
-// readline at the controlling terminal instead so interactive keyboard input
-// keeps working after the piped data is consumed. Runs once at package init,
-// before any ReadLine call.
+// ReadLine is only ever called in interactive mode, where stdin and stdout are
+// already the terminal. Stop readline from installing its own signal and resize
+// handlers; SIGINT is handled by setup_sigint_handler instead.
 func init() {
 	C.rl_catch_signals = 0  /* don't install handlers for SIGINT/SIGTERM/SIGQUIT etc. */
 	C.rl_catch_sigwinch = 0 /* don't handle terminal resize */
-
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
-		if C.use_tty_streams() != 0 {
-			panic("failed to open /dev/tty for readline")
-		}
-	}
 }
 
 // ReadLine calls GNU readline (the same library bash uses) with the given
