@@ -69,7 +69,7 @@ func mainErr(ctx context.Context, p *printer.Printer) error {
 	})
 
 	instructions := buildInstructions(p, settings, skills)
-	if settings.Interactive {
+	if setting.StdinIsTerm {
 		runInteractive(ctx, p, llm.NewEventPrinter(p), settings, model, toolsByName, instructions)
 	} else {
 		processPrompt(ctx, p, llm.NewEventPrinter(p), model, toolsByName, instructions, settings.ContextId, settings.UserInput.String())
