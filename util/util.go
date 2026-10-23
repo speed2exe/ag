@@ -48,7 +48,7 @@ func MustRenderText(termWidth int, s string) string {
 }
 
 func MustRenderCodeBlock(lang string, termWidth int, bash string) string {
-	return MustRenderText(termWidth, fmt.Sprintf("```%s\n%s\n```", lang, bash))
+	return TrimANSISpace(MustRenderText(termWidth, fmt.Sprintf("```%s\n%s\n```", lang, bash)))
 }
 
 func RenderText(termWidth int, s string) (string, error) {
@@ -90,25 +90,33 @@ func RenderText(termWidth int, s string) (string, error) {
 	}
 }
 
-// TrimRightANSISpace removes trailing whitespace without removing ANSI escape
-// sequences that apply to the remaining content.
-func TrimRightANSISpace(s string) string {
-	type token struct {
-		value string
-		ansi  bool
-	}
+// ansiToken is a single unit of an ANSI-decorated string: either printable
+// text or an ANSI escape sequence.
+type ansiToken struct {
+	value string
+	ansi  bool
+}
 
-	tokens := make([]token, 0, len(s))
+// tokenizeANSI splits s into printable text runs and ANSI escape sequences.
+func tokenizeANSI(s string) []ansiToken {
+	tokens := make([]ansiToken, 0, len(s))
 	for state, rest := xansi.NormalState, s; len(rest) > 0; {
 		sequence, _, size, nextState := xansi.DecodeSequence(rest, state, nil)
 		value := string(sequence)
-		tokens = append(tokens, token{
+		tokens = append(tokens, ansiToken{
 			value: value,
 			ansi:  isANSISequence(value),
 		})
 		state = nextState
 		rest = rest[size:]
 	}
+	return tokens
+}
+
+// TrimRightANSISpace removes trailing whitespace without removing ANSI escape
+// sequences that apply to the remaining content.
+func TrimRightANSISpace(s string) string {
+	tokens := tokenizeANSI(s)
 
 	last := -1
 	for i, token := range tokens {
@@ -135,6 +143,45 @@ func TrimRightANSISpace(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// TrimLeftANSISpace removes leading whitespace without removing ANSI escape
+// sequences that apply to the remaining content.
+func TrimLeftANSISpace(s string) string {
+	tokens := tokenizeANSI(s)
+
+	first := -1
+	for i, token := range tokens {
+		if !token.ansi && strings.TrimSpace(token.value) != "" {
+			first = i
+			break
+		}
+	}
+	if first == -1 {
+		return ""
+	}
+
+	var b strings.Builder
+	for i, token := range tokens {
+		if token.ansi {
+			b.WriteString(token.value)
+			continue
+		}
+		switch {
+		case i < first:
+		case i == first:
+			b.WriteString(strings.TrimLeftFunc(token.value, unicode.IsSpace))
+		default:
+			b.WriteString(token.value)
+		}
+	}
+	return b.String()
+}
+
+// TrimANSISpace removes leading and trailing whitespace without removing ANSI
+// escape sequences that apply to the remaining content.
+func TrimANSISpace(s string) string {
+	return TrimLeftANSISpace(TrimRightANSISpace(s))
 }
 
 func isANSISequence(s string) bool {
