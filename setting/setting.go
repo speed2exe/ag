@@ -14,6 +14,8 @@ import (
 )
 
 var (
+	StdinIsTerm = term.IsTerminal(int(os.Stdin.Fd()))
+
 	longByShort = func() map[string]string {
 		m := map[string]string{}
 		for _, def := range allSettingDefs {
@@ -39,7 +41,6 @@ var (
 
 	shortS = "s"
 	shortC = "c"
-	shortI = "i"
 
 	homeDir = func() string {
 		h, err := os.UserHomeDir()
@@ -72,7 +73,6 @@ type Settings struct {
 	ContextDir                  string
 	ContextId                   string
 	ContextTtl                  time.Duration
-	Interactive                 bool
 	HistoryFilePath             string
 	HistoryMaxCount             int
 	MaxMessagesBeforeUserPrompt int
@@ -135,17 +135,11 @@ func initSettings() (*Settings, error) {
 		}
 	}
 
-	// Read user input from stdin if not in interactive mode. In interactive
-	// mode, still read stdin when it has been piped/redirected (e.g. `echo
-	// hi | agent -i`) so the piped text becomes the first turn; but skip it
-	// when stdin is a real terminal, since blocking on ReadAll would wait for
-	// EOF before the REPL even starts.
-	if !p.Interactive || !term.IsTerminal(int(os.Stdin.Fd())) {
-		inputBytes, err := io.ReadAll(os.Stdin)
-		if err != nil {
+	// Check if user input is being piped in from stdin. If so, read it into the UserInput field.
+	if !StdinIsTerm {
+		if _, err := io.Copy(&p.UserInput, os.Stdin); err != nil {
 			return nil, fmt.Errorf("error reading user input from stdin: %w", err)
 		}
-		p.UserInput.Write(inputBytes)
 	}
 
 	if p.SessionKey != "" && p.ContextId != "" {
@@ -400,15 +394,6 @@ var allSettingDefs = []settingDef{
 		fromStrArr: strArrFromStrArr,
 		apply:      func(s *Settings, v []string) error { s.McpConfPaths = append(s.McpConfPaths, v...); return nil },
 		defVal:     &[]string{},
-	},
-	&flagDefImpl[bool]{
-		name:       "interactive",
-		short:      &shortI,
-		desc:       "Run in interactive mode, reading input from the terminal turn by turn.",
-		fromStr:    strconv.ParseBool,
-		fromStrArr: boolFromStrLastArg,
-		apply:      func(s *Settings, v bool) error { s.Interactive = v; return nil },
-		defVal:     new(false),
 	},
 	&flagDefImpl[string]{
 		name:       "history-file-path",
