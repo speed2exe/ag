@@ -305,7 +305,6 @@ func (c *ContextRecorder) saveToStore(ctxId string) error {
 type outputAccumulator struct {
 	previousEvent      models.Event
 	outputReasoningAcc strings.Builder
-	outputReasoningSig string
 	outputTextAcc      strings.Builder
 }
 
@@ -331,12 +330,9 @@ func (o *outputAccumulator) finalize() []models.Message {
 		messages = append(messages, &models.AgentResponse{Text: o.outputTextAcc.String()})
 		o.outputTextAcc.Reset()
 	}
-	if o.outputReasoningAcc.Len() > 0 || o.outputReasoningSig != "" {
-		messages = append(messages, &models.AgentReasoning{
-			Reasoning: o.outputReasoningAcc.String(),
-		})
+	if o.outputReasoningAcc.Len() > 0 {
+		messages = append(messages, &models.AgentReasoning{Reasoning: o.outputReasoningAcc.String()})
 		o.outputReasoningAcc.Reset()
-		o.outputReasoningSig = ""
 	}
 	return messages
 }
