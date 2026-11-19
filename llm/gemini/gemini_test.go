@@ -81,10 +81,9 @@ func TestNewRequiresModel(t *testing.T) {
 
 func TestNewConfiguresClient(t *testing.T) {
 	c, err := New(nil, &setting.Settings{
-		GeminiApiKey:     "my-key",
-		GeminiBaseURL:    "https://example.invalid",
-		GeminiModel:      "gemini-4-hydrogen",
-		GeminiAPIVersion: "v1beta",
+		GeminiApiKey:  "my-key",
+		GeminiBaseURL: "https://example.invalid",
+		GeminiModel:   "gemini-4-hydrogen",
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -144,7 +143,7 @@ func TestToInteractionsStepsMapping(t *testing.T) {
 	c := &Client{}
 	c.cacheThoughts("c1", []interactions.ThoughtStep{
 		{
-			Signature: genai.Ptr("sig_1"),
+			Signature: new("sig_1"),
 			Summary: []interactions.ThoughtSummaryContent{
 				interactions.NewThoughtSummaryContent(interactions.TextContent{Text: "cached reasoning"}),
 			},
