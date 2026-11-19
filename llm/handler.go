@@ -106,6 +106,9 @@ func (ep *EventPrinter) stopSpinner() {
 }
 
 func (ep *EventPrinter) Print(event models.Event) {
+	if r, ok := event.(*models.OutputReasoning); ok && r.Reasoning == "" {
+		return
+	}
 	ep.stopSpinner()
 
 	previousEventType := ep.currentEventType

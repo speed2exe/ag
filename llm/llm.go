@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/speed2exe/ag/llm/anthropic"
+	"github.com/speed2exe/ag/llm/gemini"
 	"github.com/speed2exe/ag/llm/openai"
 	"github.com/speed2exe/ag/models"
 	"github.com/speed2exe/ag/setting"
@@ -43,7 +44,18 @@ func New(log func(msg string), s *setting.Settings) (Model, error) {
 			return nil, fmt.Errorf("failed to create openai client: %w", err)
 		}
 
-		// ensure anthropic client implements ToolCaller at compile time
+		// ensure openai client implements ToolCaller at compile time
+		var tc ToolCaller = c
+		_ = tc
+
+		return c, nil
+	case setting.LlmProviderGemini:
+		c, err := gemini.New(log, s)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create gemini client: %w", err)
+		}
+
+		// ensure gemini client implements ToolCaller at compile time
 		var tc ToolCaller = c
 		_ = tc
 
