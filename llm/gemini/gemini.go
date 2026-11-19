@@ -21,14 +21,10 @@ type Client struct {
 }
 
 func New(log func(string), s *setting.Settings) (*Client, error) {
-	if s.GeminiModel == "" {
-		return nil, fmt.Errorf("missing gemini model: set --gemini-model or AG_GEMINI_MODEL")
-	}
 	cc := &genai.ClientConfig{
 		APIKey: s.GeminiApiKey,
 		HTTPOptions: genai.HTTPOptions{
-			BaseURL:    s.GeminiBaseURL,
-			APIVersion: s.GeminiAPIVersion,
+			BaseURL: s.GeminiBaseURL,
 		},
 	}
 	client, err := genai.NewClient(context.Background(), cc)
@@ -52,15 +48,11 @@ func (c *Client) GenerateStream(
 
 	body := interactions.CreateModelInteraction{
 		Model:  interactions.Model(c.model),
-		Input:  genai.Ptr(interactions.NewInteractionsInput(steps)),
-		Store:  genai.Ptr(false),
-		Stream: genai.Ptr(true),
-		GenerationConfig: &interactions.GenerationConfig{
-			ThinkingSummaries: interactions.ThinkingSummariesAuto.ToPointer(),
-		},
+		Input:  new(interactions.NewInteractionsInput(steps)),
+		Stream: new(true),
 	}
 	if sysInstruction := joinInstructions(instructions); sysInstruction != "" {
-		body.SystemInstruction = genai.Ptr(sysInstruction)
+		body.SystemInstruction = new(sysInstruction)
 	}
 	if len(geminiTools) > 0 {
 		body.Tools = geminiTools
@@ -147,9 +139,6 @@ func consumeStream(s *stream.EventStream[interactions.InteractionSSEStreamEvent]
 					events <- &models.OutputReasoning{Reasoning: tc.Text}
 				}
 			}
-			if sig := stepDelta.GetDeltaThoughtSignature(); sig != nil && sig.Signature != nil && *sig.Signature != "" {
-				events <- &models.OutputReasoning{Signature: *sig.Signature}
-			}
 			if ad := stepDelta.GetDeltaArgumentsDelta(); ad != nil && ad.Arguments != nil && *ad.Arguments != "" {
 				events <- &models.OutputFnArgs{Args: *ad.Arguments}
 				if stepDelta.Index == activeFnCallIndex {
@@ -233,10 +222,7 @@ func emitThoughtStep(ts *interactions.ThoughtStep, events chan<- models.Event) {
 		sig = *ts.Signature
 	}
 	if summary.Len() > 0 || sig != "" {
-		events <- &models.OutputReasoning{
-			Reasoning: summary.String(),
-			Signature: sig,
-		}
+		events <- &models.OutputReasoning{Reasoning: summary.String()}
 	}
 }
 
@@ -344,20 +330,13 @@ func toInteractionsSteps(messages []models.Message) []interactions.Step {
 		case *models.UserPrompt:
 			steps = append(steps, userInputStep(m.Text))
 		case *models.AgentReasoning:
-			if m.Signature == "" {
-				// Gemini validates thought signatures on stateless replay; skip
-				// reasoning blocks without a signature (e.g. loaded from another provider).
-				continue
-			}
-			thought := interactions.ThoughtStep{
-				Signature: genai.Ptr(m.Signature),
-			}
-			if m.Reasoning != "" {
-				thought.Summary = []interactions.ThoughtSummaryContent{
-					interactions.NewThoughtSummaryContent(interactions.TextContent{Text: m.Reasoning}),
-				}
-			}
-			steps = append(steps, interactions.NewStep(thought))
+			steps = append(steps, interactions.NewStep(interactions.ThoughtStep{
+				Summary: []interactions.ThoughtSummaryContent{
+					interactions.NewThoughtSummaryContent(interactions.TextContent{
+						Text: m.Reasoning,
+					}),
+				},
+			}))
 		case *models.AgentResponse:
 			steps = append(steps, modelOutputStep(m.Text))
 		case *models.OutputErr:
@@ -383,7 +362,7 @@ func toInteractionsSteps(messages []models.Message) []interactions.Step {
 			for _, tc := range callItems {
 				steps = append(steps, interactions.NewStep(interactions.FunctionResultStep{
 					CallID: tc.CallId,
-					Name:   genai.Ptr(tc.Name),
+					Name:   new(tc.Name),
 					Result: interactions.NewFunctionResultStepResultUnion([]interactions.FunctionResultSubcontent{
 						interactions.NewFunctionResultSubcontent(interactions.TextContent{Text: tc.Result}),
 					}),

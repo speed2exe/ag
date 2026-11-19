@@ -318,17 +318,7 @@ func (o *outputAccumulator) collect(event models.Event) []models.Message {
 
 	switch e := event.(type) {
 	case *models.OutputReasoning:
-		// A thought signature marks the end of a thought step. If another
-		// reasoning event arrives after a signature is already recorded, flush
-		// the completed thought first so back-to-back thoughts keep their own
-		// signatures.
-		if o.outputReasoningSig != "" && (e.Reasoning != "" || e.Signature != "") {
-			messages = append(messages, o.finalize()...)
-		}
 		o.outputReasoningAcc.WriteString(e.Reasoning)
-		if e.Signature != "" {
-			o.outputReasoningSig = e.Signature
-		}
 	case *models.OutputText:
 		o.outputTextAcc.WriteString(e.Text)
 	}
@@ -344,7 +334,6 @@ func (o *outputAccumulator) finalize() []models.Message {
 	if o.outputReasoningAcc.Len() > 0 || o.outputReasoningSig != "" {
 		messages = append(messages, &models.AgentReasoning{
 			Reasoning: o.outputReasoningAcc.String(),
-			Signature: o.outputReasoningSig,
 		})
 		o.outputReasoningAcc.Reset()
 		o.outputReasoningSig = ""

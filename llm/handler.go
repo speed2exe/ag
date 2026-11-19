@@ -421,9 +421,10 @@ func (ep *EventPrinter) processOutput(event models.Output) {
 		ep.toolCallName = e.Name
 		ep.printer.Print(printer.ColorGreen, e.Name)
 	case *models.OutputFnArgs:
-		if ep.toolCallName == consts.BashToolName {
+		switch ep.toolCallName {
+		case consts.BashToolName:
 			ep.bashToolCallJsonBuf.WriteString(e.Args)
-		} else if ep.toolCallName == consts.LuaToolName {
+		case consts.LuaToolName:
 			ep.luaToolCallJsonBuf.WriteString(e.Args)
 		}
 		ep.printer.Print(e.Args)
