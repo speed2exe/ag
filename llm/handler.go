@@ -106,9 +106,6 @@ func (ep *EventPrinter) stopSpinner() {
 }
 
 func (ep *EventPrinter) Print(event models.Event) {
-	if r, ok := event.(*models.OutputReasoning); ok && r.Reasoning == "" {
-		return
-	}
 	ep.stopSpinner()
 
 	previousEventType := ep.currentEventType
@@ -421,10 +418,9 @@ func (ep *EventPrinter) processOutput(event models.Output) {
 		ep.toolCallName = e.Name
 		ep.printer.Print(printer.ColorGreen, e.Name)
 	case *models.OutputFnArgs:
-		switch ep.toolCallName {
-		case consts.BashToolName:
+		if ep.toolCallName == consts.BashToolName {
 			ep.bashToolCallJsonBuf.WriteString(e.Args)
-		case consts.LuaToolName:
+		} else if ep.toolCallName == consts.LuaToolName {
 			ep.luaToolCallJsonBuf.WriteString(e.Args)
 		}
 		ep.printer.Print(e.Args)

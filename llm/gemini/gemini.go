@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json/v2"
 	"fmt"
+	"slices"
 	"strings"
+	"sync"
 
 	"github.com/speed2exe/ag/models"
 	"github.com/speed2exe/ag/setting"
@@ -18,13 +20,24 @@ import (
 type Client struct {
 	client *genai.Client
 	model  string
+
+	// Gemini 3/4 strictly requires thought steps (with their encrypted
+	// signatures) to be replayed before any function_call in the active turn.
+	// Keeping them cached here by call ID avoids leaking provider-specific
+	// signatures into shared message/event types.
+	mu               sync.Mutex
+	thoughtsByCallID map[string][]interactions.ThoughtStep
 }
 
 func New(log func(string), s *setting.Settings) (*Client, error) {
+	if s.GeminiModel == "" {
+		return nil, fmt.Errorf("missing gemini model: set --gemini-model or AG_GEMINI_MODEL")
+	}
 	cc := &genai.ClientConfig{
 		APIKey: s.GeminiApiKey,
 		HTTPOptions: genai.HTTPOptions{
-			BaseURL: s.GeminiBaseURL,
+			BaseURL:    s.GeminiBaseURL,
+			APIVersion: s.GeminiAPIVersion,
 		},
 	}
 	client, err := genai.NewClient(context.Background(), cc)
@@ -32,9 +45,33 @@ func New(log func(string), s *setting.Settings) (*Client, error) {
 		return nil, fmt.Errorf("genai.NewClient: %w", err)
 	}
 	return &Client{
-		client: client,
-		model:  s.GeminiModel,
+		client:           client,
+		model:            s.GeminiModel,
+		thoughtsByCallID: make(map[string][]interactions.ThoughtStep),
 	}, nil
+}
+
+func (c *Client) cacheThoughts(callID string, thoughts []interactions.ThoughtStep) {
+	if callID == "" || len(thoughts) == 0 {
+		return
+	}
+	copied := slices.Clone(thoughts)
+	c.mu.Lock()
+	if c.thoughtsByCallID == nil {
+		c.thoughtsByCallID = make(map[string][]interactions.ThoughtStep)
+	}
+	c.thoughtsByCallID[callID] = copied
+	c.mu.Unlock()
+}
+
+func (c *Client) lookupThoughts(callID string) []interactions.ThoughtStep {
+	if callID == "" {
+		return nil
+	}
+	c.mu.Lock()
+	thoughts := c.thoughtsByCallID[callID]
+	c.mu.Unlock()
+	return thoughts
 }
 
 func (c *Client) GenerateStream(
@@ -43,16 +80,20 @@ func (c *Client) GenerateStream(
 	tools []*tool.Tool,
 	messages []models.Message,
 ) <-chan models.Event {
-	steps := toInteractionsSteps(messages)
+	steps := c.toInteractionsSteps(messages)
 	geminiTools := toInteractionsTools(tools)
 
 	body := interactions.CreateModelInteraction{
 		Model:  interactions.Model(c.model),
-		Input:  new(interactions.NewInteractionsInput(steps)),
-		Stream: new(true),
+		Input:  genai.Ptr(interactions.NewInteractionsInput(steps)),
+		Store:  genai.Ptr(false),
+		Stream: genai.Ptr(true),
+		GenerationConfig: &interactions.GenerationConfig{
+			ThinkingSummaries: interactions.ThinkingSummariesAuto.ToPointer(),
+		},
 	}
 	if sysInstruction := joinInstructions(instructions); sysInstruction != "" {
-		body.SystemInstruction = new(sysInstruction)
+		body.SystemInstruction = genai.Ptr(sysInstruction)
 	}
 	if len(geminiTools) > 0 {
 		body.Tools = geminiTools
@@ -73,23 +114,49 @@ func (c *Client) GenerateStream(
 		}
 
 		if res.InteractionSSEStreamEvent != nil {
-			consumeStream(res.InteractionSSEStreamEvent, events)
+			c.consumeStream(res.InteractionSSEStreamEvent, events)
 			return
 		}
 		if res.Interaction != nil {
-			emitUnaryInteraction(res.Interaction, events)
+			c.emitUnaryInteraction(res.Interaction, events)
 		}
 	}()
 
 	return events
 }
 
-func consumeStream(s *stream.EventStream[interactions.InteractionSSEStreamEvent], events chan<- models.Event) {
+func (c *Client) consumeStream(s *stream.EventStream[interactions.InteractionSSEStreamEvent], events chan<- models.Event) {
 	defer s.Close()
+
+	activeThoughtIndex := -1
+	var activeThoughtSummary strings.Builder
+	activeThoughtSig := ""
+	var pendingThoughts []interactions.ThoughtStep
 
 	activeFnCallIndex := -1
 	activeFnCallHasArgs := false
 	sawErr := false
+
+	flushActiveThought := func() {
+		if activeThoughtIndex != -1 {
+			if activeThoughtSig != "" {
+				thought := interactions.ThoughtStep{
+					Signature: genai.Ptr(activeThoughtSig),
+				}
+				if activeThoughtSummary.Len() > 0 {
+					thought.Summary = []interactions.ThoughtSummaryContent{
+						interactions.NewThoughtSummaryContent(interactions.TextContent{
+							Text: activeThoughtSummary.String(),
+						}),
+					}
+				}
+				pendingThoughts = append(pendingThoughts, thought)
+			}
+			activeThoughtIndex = -1
+			activeThoughtSummary.Reset()
+			activeThoughtSig = ""
+		}
+	}
 
 	flushActiveFnCall := func() {
 		if activeFnCallIndex != -1 {
@@ -109,9 +176,17 @@ func consumeStream(s *stream.EventStream[interactions.InteractionSSEStreamEvent]
 		data := ev.Data
 
 		if stepStart := data.StepStart; stepStart != nil {
+			flushActiveThought()
 			flushActiveFnCall()
 			if ts := stepStart.GetStepThought(); ts != nil {
-				emitThoughtStep(ts, events)
+				activeThoughtIndex = stepStart.Index
+				if summary := thoughtSummaryText(ts); summary != "" {
+					activeThoughtSummary.WriteString(summary)
+					events <- &models.OutputReasoning{Reasoning: summary}
+				}
+				if ts.Signature != nil && *ts.Signature != "" {
+					activeThoughtSig = *ts.Signature
+				}
 			}
 			if mo := stepStart.GetStepModelOutput(); mo != nil {
 				if emitModelOutputStep(mo, events) {
@@ -119,6 +194,10 @@ func consumeStream(s *stream.EventStream[interactions.InteractionSSEStreamEvent]
 				}
 			}
 			if fc := stepStart.GetStepFunctionCall(); fc != nil {
+				if fc.ID != "" && len(pendingThoughts) > 0 {
+					c.cacheThoughts(fc.ID, pendingThoughts)
+					pendingThoughts = nil
+				}
 				events <- &models.OutputFnCall{CallId: fc.ID, Name: fc.Name}
 				activeFnCallIndex = stepStart.Index
 				activeFnCallHasArgs = false
@@ -136,7 +215,21 @@ func consumeStream(s *stream.EventStream[interactions.InteractionSSEStreamEvent]
 			}
 			if ts := stepDelta.GetDeltaThoughtSummary(); ts != nil {
 				if tc := ts.GetContentText(); tc != nil && tc.Text != "" {
+					if activeThoughtIndex == -1 {
+						activeThoughtIndex = stepDelta.Index
+					}
+					if stepDelta.Index == activeThoughtIndex {
+						activeThoughtSummary.WriteString(tc.Text)
+					}
 					events <- &models.OutputReasoning{Reasoning: tc.Text}
+				}
+			}
+			if sig := stepDelta.GetDeltaThoughtSignature(); sig != nil && sig.Signature != nil && *sig.Signature != "" {
+				if activeThoughtIndex == -1 {
+					activeThoughtIndex = stepDelta.Index
+				}
+				if stepDelta.Index == activeThoughtIndex {
+					activeThoughtSig = *sig.Signature
 				}
 			}
 			if ad := stepDelta.GetDeltaArgumentsDelta(); ad != nil && ad.Arguments != nil && *ad.Arguments != "" {
@@ -149,6 +242,9 @@ func consumeStream(s *stream.EventStream[interactions.InteractionSSEStreamEvent]
 		}
 
 		if stepStop := data.StepStop; stepStop != nil {
+			if stepStop.Index == activeThoughtIndex {
+				flushActiveThought()
+			}
 			if stepStop.Index == activeFnCallIndex {
 				flushActiveFnCall()
 			}
@@ -156,6 +252,7 @@ func consumeStream(s *stream.EventStream[interactions.InteractionSSEStreamEvent]
 		}
 
 		if completed := data.InteractionCompletedEvent; completed != nil {
+			flushActiveThought()
 			flushActiveFnCall()
 			if usage := completed.Interaction.Usage; usage != nil {
 				events <- toTokenUsage(usage)
@@ -168,6 +265,7 @@ func consumeStream(s *stream.EventStream[interactions.InteractionSSEStreamEvent]
 		}
 
 		if errEv := data.ErrorEvent; errEv != nil {
+			flushActiveThought()
 			flushActiveFnCall()
 			events <- &models.OutputErr{Err: formatInteractionError(errEv.Error)}
 			sawErr = true
@@ -178,22 +276,32 @@ func consumeStream(s *stream.EventStream[interactions.InteractionSSEStreamEvent]
 		events <- &models.OutputErr{Err: fmt.Sprintf("stream error: %v", err)}
 		return
 	}
+	flushActiveThought()
 	flushActiveFnCall()
 }
 
-func emitUnaryInteraction(inter *interactions.Interaction, events chan<- models.Event) {
+func (c *Client) emitUnaryInteraction(inter *interactions.Interaction, events chan<- models.Event) {
+	var pendingThoughts []interactions.ThoughtStep
 	sawErr := false
 	for _, step := range inter.Steps {
-		if step.ThoughtStep != nil {
-			emitThoughtStep(step.ThoughtStep, events)
+		if ts := step.ThoughtStep; ts != nil {
+			if summary := thoughtSummaryText(ts); summary != "" {
+				events <- &models.OutputReasoning{Reasoning: summary}
+			}
+			if ts.Signature != nil && *ts.Signature != "" {
+				pendingThoughts = append(pendingThoughts, *ts)
+			}
 		}
 		if step.ModelOutputStep != nil {
 			if emitModelOutputStep(step.ModelOutputStep, events) {
 				sawErr = true
 			}
 		}
-		if step.FunctionCallStep != nil {
-			fc := step.FunctionCallStep
+		if fc := step.FunctionCallStep; fc != nil {
+			if fc.ID != "" && len(pendingThoughts) > 0 {
+				c.cacheThoughts(fc.ID, pendingThoughts)
+				pendingThoughts = nil
+			}
 			events <- &models.OutputFnCall{CallId: fc.ID, Name: fc.Name}
 			events <- &models.OutputFnArgs{Args: marshalArgs(fc.Arguments)}
 		}
@@ -210,20 +318,14 @@ func emitUnaryInteraction(inter *interactions.Interaction, events chan<- models.
 	}
 }
 
-func emitThoughtStep(ts *interactions.ThoughtStep, events chan<- models.Event) {
+func thoughtSummaryText(ts *interactions.ThoughtStep) string {
 	var summary strings.Builder
 	for _, block := range ts.Summary {
 		if block.TextContent != nil && block.TextContent.Text != "" {
 			summary.WriteString(block.TextContent.Text)
 		}
 	}
-	sig := ""
-	if ts.Signature != nil {
-		sig = *ts.Signature
-	}
-	if summary.Len() > 0 || sig != "" {
-		events <- &models.OutputReasoning{Reasoning: summary.String()}
-	}
+	return summary.String()
 }
 
 func emitModelOutputStep(mo *interactions.ModelOutputStep, events chan<- models.Event) (emittedErr bool) {
@@ -318,7 +420,7 @@ func modelOutputStep(text string) interactions.Step {
 	})
 }
 
-func toInteractionsSteps(messages []models.Message) []interactions.Step {
+func (c *Client) toInteractionsSteps(messages []models.Message) []interactions.Step {
 	steps := make([]interactions.Step, 0, len(messages))
 	seenCallIds := make(map[string]struct{})
 	for _, msg := range messages {
@@ -330,13 +432,9 @@ func toInteractionsSteps(messages []models.Message) []interactions.Step {
 		case *models.UserPrompt:
 			steps = append(steps, userInputStep(m.Text))
 		case *models.AgentReasoning:
-			steps = append(steps, interactions.NewStep(interactions.ThoughtStep{
-				Summary: []interactions.ThoughtSummaryContent{
-					interactions.NewThoughtSummaryContent(interactions.TextContent{
-						Text: m.Reasoning,
-					}),
-				},
-			}))
+			// Gemini validates thought signatures on replay; signed thought
+			// steps are replayed from c.thoughtsByCallID before their tool calls.
+			continue
 		case *models.AgentResponse:
 			steps = append(steps, modelOutputStep(m.Text))
 		case *models.OutputErr:
@@ -353,6 +451,9 @@ func toInteractionsSteps(messages []models.Message) []interactions.Step {
 				callItems = append(callItems, tc)
 			}
 			for _, tc := range callItems {
+				for _, thought := range c.lookupThoughts(tc.CallId) {
+					steps = append(steps, interactions.NewStep(thought))
+				}
 				steps = append(steps, interactions.NewStep(interactions.FunctionCallStep{
 					ID:        tc.CallId,
 					Name:      tc.Name,
@@ -362,7 +463,7 @@ func toInteractionsSteps(messages []models.Message) []interactions.Step {
 			for _, tc := range callItems {
 				steps = append(steps, interactions.NewStep(interactions.FunctionResultStep{
 					CallID: tc.CallId,
-					Name:   new(tc.Name),
+					Name:   genai.Ptr(tc.Name),
 					Result: interactions.NewFunctionResultStepResultUnion([]interactions.FunctionResultSubcontent{
 						interactions.NewFunctionResultSubcontent(interactions.TextContent{Text: tc.Result}),
 					}),

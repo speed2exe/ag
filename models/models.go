@@ -52,9 +52,7 @@ type OutputText struct{ Text string }
 func (e *OutputText) isOutput() {}
 func (e *OutputText) isEvent()  {}
 
-type OutputReasoning struct {
-	Reasoning string
-}
+type OutputReasoning struct{ Reasoning string }
 
 func (e *OutputReasoning) isOutput() {}
 func (e *OutputReasoning) isEvent()  {}
