@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json/v2"
 	"fmt"
-	"slices"
 	"strings"
 	"sync"
 
@@ -14,60 +13,31 @@ import (
 	"google.golang.org/genai"
 	"google.golang.org/genai/interactions/models/interactions"
 	"google.golang.org/genai/interactions/models/operations"
-	"google.golang.org/genai/interactions/types/stream"
 )
 
 type Client struct {
 	client *genai.Client
 	model  string
 
-	// Gemini 3/4 strictly requires thought steps (with their encrypted
-	// signatures) to be replayed before any function_call in the active turn.
-	// Keeping them cached here by call ID avoids leaking provider-specific
-	// signatures into shared message/event types.
-	mu               sync.Mutex
-	thoughtsByCallID map[string][]interactions.ThoughtStep
+	// Gemini 3/4 requires signed thought steps to be replayed before their
+	// corresponding function_call steps.
+	mu          sync.Mutex
+	thoughtSigs map[string][]string
 }
 
 func New(log func(string), s *setting.Settings) (*Client, error) {
-	cc := &genai.ClientConfig{
-		APIKey: s.GeminiApiKey,
-		HTTPOptions: genai.HTTPOptions{
-			BaseURL: s.GeminiBaseURL,
-		},
-	}
-	client, err := genai.NewClient(context.Background(), cc)
+	client, err := genai.NewClient(context.Background(), &genai.ClientConfig{
+		APIKey:      s.GeminiApiKey,
+		HTTPOptions: genai.HTTPOptions{BaseURL: s.GeminiBaseURL},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("genai.NewClient: %w", err)
 	}
 	return &Client{
-		client:           client,
-		model:            s.GeminiModel,
-		thoughtsByCallID: make(map[string][]interactions.ThoughtStep),
+		client:      client,
+		model:       s.GeminiModel,
+		thoughtSigs: make(map[string][]string),
 	}, nil
-}
-
-func (c *Client) cacheThoughts(callID string, thoughts []interactions.ThoughtStep) {
-	if callID == "" || len(thoughts) == 0 {
-		return
-	}
-	copied := slices.Clone(thoughts)
-	c.mu.Lock()
-	if c.thoughtsByCallID == nil {
-		c.thoughtsByCallID = make(map[string][]interactions.ThoughtStep)
-	}
-	c.thoughtsByCallID[callID] = copied
-	c.mu.Unlock()
-}
-
-func (c *Client) lookupThoughts(callID string) []interactions.ThoughtStep {
-	if callID == "" {
-		return nil
-	}
-	c.mu.Lock()
-	thoughts := c.thoughtsByCallID[callID]
-	c.mu.Unlock()
-	return thoughts
 }
 
 func (c *Client) GenerateStream(
@@ -76,392 +46,138 @@ func (c *Client) GenerateStream(
 	tools []*tool.Tool,
 	messages []models.Message,
 ) <-chan models.Event {
-	steps := c.toInteractionsSteps(messages)
-	geminiTools := toInteractionsTools(tools)
-
 	body := interactions.CreateModelInteraction{
 		Model:  interactions.Model(c.model),
-		Input:  new(interactions.NewInteractionsInput(steps)),
+		Input:  new(interactions.NewInteractionsInput(c.toInteractionsSteps(messages))),
+		Tools:  toInteractionsTools(tools),
 		Stream: new(true),
 		GenerationConfig: &interactions.GenerationConfig{
-			ThinkingSummaries: interactions.ThinkingSummariesAuto.ToPointer(),
+			ThinkingSummaries: new(interactions.ThinkingSummariesAuto),
 		},
 	}
-	if sysInstruction := joinInstructions(instructions); sysInstruction != "" {
-		body.SystemInstruction = new(sysInstruction)
-	}
-	if len(geminiTools) > 0 {
-		body.Tools = geminiTools
-	}
-
-	req := operations.CreateInteractionRequest{
-		Body: operations.NewCreateInteractionRequestBody(body),
+	if sys := strings.Join(instructions, "\n\n"); sys != "" {
+		body.SystemInstruction = new(sys)
 	}
 
 	events := make(chan models.Event, 64)
 	go func() {
 		defer close(events)
 
-		res, err := c.client.Interactions.Create(ctx, req)
+		res, err := c.client.Interactions.Create(ctx, operations.CreateInteractionRequest{
+			Body: operations.NewCreateInteractionRequestBody(body),
+		})
 		if err != nil {
 			events <- &models.OutputErr{Err: fmt.Sprintf("interaction error: %v", err)}
 			return
 		}
-
-		if res.InteractionSSEStreamEvent != nil {
-			c.consumeStream(res.InteractionSSEStreamEvent, events)
+		s := res.InteractionSSEStreamEvent
+		if s == nil {
 			return
 		}
-		if res.Interaction != nil {
-			c.emitUnaryInteraction(res.Interaction, events)
+		defer s.Close()
+
+		var pendingSigs []string
+		for s.Next() {
+			data := s.Value().Data
+			switch {
+			case data.StepStart != nil:
+				if fc := data.StepStart.Step.FunctionCallStep; fc != nil {
+					if fc.ID != "" && len(pendingSigs) > 0 {
+						c.mu.Lock()
+						c.thoughtSigs[fc.ID] = pendingSigs
+						c.mu.Unlock()
+						pendingSigs = nil
+					}
+					events <- &models.OutputFnCall{CallId: fc.ID, Name: fc.Name}
+					if len(fc.Arguments) > 0 {
+						if bs, err := json.Marshal(fc.Arguments); err == nil {
+							events <- &models.OutputFnArgs{Args: string(bs)}
+						}
+					}
+				}
+			case data.StepDelta != nil:
+				d := data.StepDelta.Delta
+				switch {
+				case d.TextDelta != nil:
+					events <- &models.OutputText{Text: d.TextDelta.Text}
+				case d.ThoughtSummaryDelta != nil:
+					if tc := d.ThoughtSummaryDelta.GetContentText(); tc != nil {
+						events <- &models.OutputReasoning{Reasoning: tc.Text}
+					}
+				case d.ThoughtSignatureDelta != nil:
+					if sig := deref(d.ThoughtSignatureDelta.Signature); sig != "" {
+						pendingSigs = append(pendingSigs, sig)
+					}
+				case d.ArgumentsDelta != nil:
+					if args := deref(d.ArgumentsDelta.Arguments); args != "" {
+						events <- &models.OutputFnArgs{Args: args}
+					}
+				}
+			case data.InteractionCompletedEvent != nil:
+				if u := data.InteractionCompletedEvent.Interaction.Usage; u != nil {
+					events <- &models.TokenUsage{
+						InputTokens:           deref(u.TotalInputTokens),
+						InputTokensCached:     deref(u.TotalCachedTokens),
+						OutputTokens:          deref(u.TotalOutputTokens),
+						OutputTokensReasoning: deref(u.TotalThoughtTokens),
+					}
+				}
+			case data.ErrorEvent != nil:
+				events <- &models.OutputErr{Err: fmt.Sprintf("interaction error: %s", deref(data.ErrorEvent.Error.GetMessage()))}
+			}
+		}
+
+		if err := s.Err(); err != nil {
+			events <- &models.OutputErr{Err: fmt.Sprintf("stream error: %v", err)}
 		}
 	}()
 
 	return events
 }
 
-func (c *Client) consumeStream(s *stream.EventStream[interactions.InteractionSSEStreamEvent], events chan<- models.Event) {
-	defer s.Close()
-
-	activeThoughtIndex := -1
-	var activeThoughtSummary strings.Builder
-	activeThoughtSig := ""
-	var pendingThoughts []interactions.ThoughtStep
-
-	activeFnCallIndex := -1
-	activeFnCallHasArgs := false
-	sawErr := false
-
-	flushActiveThought := func() {
-		if activeThoughtIndex != -1 {
-			if activeThoughtSig != "" {
-				thought := interactions.ThoughtStep{
-					Signature: new(activeThoughtSig),
-				}
-				if activeThoughtSummary.Len() > 0 {
-					thought.Summary = []interactions.ThoughtSummaryContent{
-						interactions.NewThoughtSummaryContent(interactions.TextContent{
-							Text: activeThoughtSummary.String(),
-						}),
-					}
-				}
-				pendingThoughts = append(pendingThoughts, thought)
-			}
-			activeThoughtIndex = -1
-			activeThoughtSummary.Reset()
-			activeThoughtSig = ""
-		}
-	}
-
-	flushActiveFnCall := func() {
-		if activeFnCallIndex != -1 {
-			if !activeFnCallHasArgs {
-				events <- &models.OutputFnArgs{Args: "{}"}
-			}
-			activeFnCallIndex = -1
-			activeFnCallHasArgs = false
-		}
-	}
-
-	for s.Next() {
-		ev := s.Value()
-		if ev == nil {
-			continue
-		}
-		data := ev.Data
-
-		if stepStart := data.StepStart; stepStart != nil {
-			flushActiveThought()
-			flushActiveFnCall()
-			if ts := stepStart.GetStepThought(); ts != nil {
-				activeThoughtIndex = stepStart.Index
-				if summary := thoughtSummaryText(ts); summary != "" {
-					activeThoughtSummary.WriteString(summary)
-					events <- &models.OutputReasoning{Reasoning: summary}
-				}
-				if ts.Signature != nil && *ts.Signature != "" {
-					activeThoughtSig = *ts.Signature
-				}
-			}
-			if mo := stepStart.GetStepModelOutput(); mo != nil {
-				if emitModelOutputStep(mo, events) {
-					sawErr = true
-				}
-			}
-			if fc := stepStart.GetStepFunctionCall(); fc != nil {
-				if fc.ID != "" && len(pendingThoughts) > 0 {
-					c.cacheThoughts(fc.ID, pendingThoughts)
-					pendingThoughts = nil
-				}
-				events <- &models.OutputFnCall{CallId: fc.ID, Name: fc.Name}
-				activeFnCallIndex = stepStart.Index
-				activeFnCallHasArgs = false
-				if len(fc.Arguments) > 0 {
-					events <- &models.OutputFnArgs{Args: marshalArgs(fc.Arguments)}
-					activeFnCallHasArgs = true
-				}
-			}
-			continue
-		}
-
-		if stepDelta := data.StepDelta; stepDelta != nil {
-			if td := stepDelta.GetDeltaText(); td != nil && td.Text != "" {
-				events <- &models.OutputText{Text: td.Text}
-			}
-			if ts := stepDelta.GetDeltaThoughtSummary(); ts != nil {
-				if tc := ts.GetContentText(); tc != nil && tc.Text != "" {
-					if activeThoughtIndex == -1 {
-						activeThoughtIndex = stepDelta.Index
-					}
-					if stepDelta.Index == activeThoughtIndex {
-						activeThoughtSummary.WriteString(tc.Text)
-					}
-					events <- &models.OutputReasoning{Reasoning: tc.Text}
-				}
-			}
-			if sig := stepDelta.GetDeltaThoughtSignature(); sig != nil && sig.Signature != nil && *sig.Signature != "" {
-				if activeThoughtIndex == -1 {
-					activeThoughtIndex = stepDelta.Index
-				}
-				if stepDelta.Index == activeThoughtIndex {
-					activeThoughtSig = *sig.Signature
-				}
-			}
-			if ad := stepDelta.GetDeltaArgumentsDelta(); ad != nil && ad.Arguments != nil && *ad.Arguments != "" {
-				events <- &models.OutputFnArgs{Args: *ad.Arguments}
-				if stepDelta.Index == activeFnCallIndex {
-					activeFnCallHasArgs = true
-				}
-			}
-			continue
-		}
-
-		if stepStop := data.StepStop; stepStop != nil {
-			if stepStop.Index == activeThoughtIndex {
-				flushActiveThought()
-			}
-			if stepStop.Index == activeFnCallIndex {
-				flushActiveFnCall()
-			}
-			continue
-		}
-
-		if completed := data.InteractionCompletedEvent; completed != nil {
-			flushActiveThought()
-			flushActiveFnCall()
-			if usage := completed.Interaction.Usage; usage != nil {
-				events <- toTokenUsage(usage)
-			}
-			if completed.Interaction.Status == interactions.InteractionSseEventInteractionStatusFailed && !sawErr {
-				events <- &models.OutputErr{Err: "interaction failed"}
-				sawErr = true
-			}
-			continue
-		}
-
-		if errEv := data.ErrorEvent; errEv != nil {
-			flushActiveThought()
-			flushActiveFnCall()
-			events <- &models.OutputErr{Err: formatInteractionError(errEv.Error)}
-			sawErr = true
-		}
-	}
-
-	if err := s.Err(); err != nil {
-		events <- &models.OutputErr{Err: fmt.Sprintf("stream error: %v", err)}
-		return
-	}
-	flushActiveThought()
-	flushActiveFnCall()
-}
-
-func (c *Client) emitUnaryInteraction(inter *interactions.Interaction, events chan<- models.Event) {
-	var pendingThoughts []interactions.ThoughtStep
-	sawErr := false
-	for _, step := range inter.Steps {
-		if ts := step.ThoughtStep; ts != nil {
-			if summary := thoughtSummaryText(ts); summary != "" {
-				events <- &models.OutputReasoning{Reasoning: summary}
-			}
-			if ts.Signature != nil && *ts.Signature != "" {
-				pendingThoughts = append(pendingThoughts, *ts)
-			}
-		}
-		if step.ModelOutputStep != nil {
-			if emitModelOutputStep(step.ModelOutputStep, events) {
-				sawErr = true
-			}
-		}
-		if fc := step.FunctionCallStep; fc != nil {
-			if fc.ID != "" && len(pendingThoughts) > 0 {
-				c.cacheThoughts(fc.ID, pendingThoughts)
-				pendingThoughts = nil
-			}
-			events <- &models.OutputFnCall{CallId: fc.ID, Name: fc.Name}
-			events <- &models.OutputFnArgs{Args: marshalArgs(fc.Arguments)}
-		}
-	}
-	for i := range inter.Errors {
-		events <- &models.OutputErr{Err: formatInteractionError(&inter.Errors[i])}
-		sawErr = true
-	}
-	if inter.Usage != nil {
-		events <- toTokenUsage(inter.Usage)
-	}
-	if inter.Status == interactions.InteractionStatusFailed && !sawErr {
-		events <- &models.OutputErr{Err: "interaction failed"}
-	}
-}
-
-func thoughtSummaryText(ts *interactions.ThoughtStep) string {
-	var summary strings.Builder
-	for _, block := range ts.Summary {
-		if block.TextContent != nil && block.TextContent.Text != "" {
-			summary.WriteString(block.TextContent.Text)
-		}
-	}
-	return summary.String()
-}
-
-func emitModelOutputStep(mo *interactions.ModelOutputStep, events chan<- models.Event) (emittedErr bool) {
-	for _, block := range mo.Content {
-		if block.TextContent != nil && block.TextContent.Text != "" {
-			events <- &models.OutputText{Text: block.TextContent.Text}
-		}
-	}
-	if mo.Error != nil {
-		events <- &models.OutputErr{Err: formatStatusError(mo.Error)}
-		return true
-	}
-	return false
-}
-
-func toTokenUsage(u *interactions.Usage) *models.TokenUsage {
-	return &models.TokenUsage{
-		InputTokens:           derefInt(u.TotalInputTokens),
-		InputTokensCached:     derefInt(u.TotalCachedTokens),
-		OutputTokens:          derefInt(u.TotalOutputTokens),
-		OutputTokensReasoning: derefInt(u.TotalThoughtTokens),
-	}
-}
-
-func derefInt(p *int) int {
-	if p == nil {
-		return 0
-	}
-	return *p
-}
-
-func formatInteractionError(e *interactions.Error) string {
-	if e == nil {
-		return "interaction error"
-	}
-	code := ""
-	if e.Code != nil {
-		code = *e.Code
-	}
-	msg := ""
-	if e.Message != nil {
-		msg = *e.Message
-	}
-	switch {
-	case code != "" && msg != "":
-		return fmt.Sprintf("interaction error (%s): %s", code, msg)
-	case msg != "":
-		return fmt.Sprintf("interaction error: %s", msg)
-	case code != "":
-		return fmt.Sprintf("interaction error (%s)", code)
-	default:
-		return "interaction error"
-	}
-}
-
-func formatStatusError(s *interactions.Status) string {
-	if s == nil {
-		return "model output error"
-	}
-	if s.Message != nil && *s.Message != "" {
-		return fmt.Sprintf("model output error: %s", *s.Message)
-	}
-	if s.Code != nil {
-		return fmt.Sprintf("model output error (code %d)", *s.Code)
-	}
-	return "model output error"
-}
-
-func joinInstructions(instructions []string) string {
-	parts := make([]string, 0, len(instructions))
-	for _, s := range instructions {
-		if s != "" {
-			parts = append(parts, s)
-		}
-	}
-	return strings.Join(parts, "\n\n")
-}
-
-func userInputStep(text string) interactions.Step {
-	return interactions.NewStep(interactions.UserInputStep{
-		Content: []interactions.Content{
-			interactions.NewContent(interactions.TextContent{Text: text}),
-		},
-	})
-}
-
-func modelOutputStep(text string) interactions.Step {
-	return interactions.NewStep(interactions.ModelOutputStep{
-		Content: []interactions.Content{
-			interactions.NewContent(interactions.TextContent{Text: text}),
-		},
-	})
+func textContent(text string) []interactions.Content {
+	return []interactions.Content{interactions.NewContent(interactions.TextContent{Text: text})}
 }
 
 func (c *Client) toInteractionsSteps(messages []models.Message) []interactions.Step {
 	steps := make([]interactions.Step, 0, len(messages))
-	seenCallIds := make(map[string]struct{})
 	for _, msg := range messages {
 		switch m := msg.(type) {
 		case *models.ContextId:
 			panic("ContextId should not be in messages")
 		case *models.Summary:
-			steps = append(steps, userInputStep(m.Text))
+			steps = append(steps, interactions.NewStep(interactions.UserInputStep{Content: textContent(m.Text)}))
 		case *models.UserPrompt:
-			steps = append(steps, userInputStep(m.Text))
+			steps = append(steps, interactions.NewStep(interactions.UserInputStep{Content: textContent(m.Text)}))
 		case *models.AgentReasoning:
-			// Gemini validates thought signatures on replay; signed thought
-			// steps are replayed from c.thoughtsByCallID before their tool calls.
-			continue
 		case *models.AgentResponse:
-			steps = append(steps, modelOutputStep(m.Text))
+			steps = append(steps, interactions.NewStep(interactions.ModelOutputStep{Content: textContent(m.Text)}))
 		case *models.OutputErr:
-			steps = append(steps, modelOutputStep(m.Err))
+			steps = append(steps, interactions.NewStep(interactions.ModelOutputStep{Content: textContent(m.Err)}))
 		case *models.ToolCalls:
-			callItems := make([]*models.ToolCall, 0, len(m.Items))
 			for _, tc := range m.Items {
-				if tc.CallId != "" {
-					if _, seen := seenCallIds[tc.CallId]; seen {
-						continue
-					}
-					seenCallIds[tc.CallId] = struct{}{}
+				c.mu.Lock()
+				sigs := c.thoughtSigs[tc.CallId]
+				c.mu.Unlock()
+				for _, sig := range sigs {
+					steps = append(steps, interactions.NewStep(interactions.ThoughtStep{Signature: new(sig)}))
 				}
-				callItems = append(callItems, tc)
-			}
-			for _, tc := range callItems {
-				for _, thought := range c.lookupThoughts(tc.CallId) {
-					steps = append(steps, interactions.NewStep(thought))
+				var args map[string]any
+				_ = json.Unmarshal([]byte(tc.Args), &args)
+				if args == nil {
+					args = map[string]any{}
 				}
 				steps = append(steps, interactions.NewStep(interactions.FunctionCallStep{
 					ID:        tc.CallId,
 					Name:      tc.Name,
-					Arguments: parseToolArgs(tc.Args),
+					Arguments: args,
 				}))
 			}
-			for _, tc := range callItems {
+			for _, tc := range m.Items {
 				steps = append(steps, interactions.NewStep(interactions.FunctionResultStep{
 					CallID: tc.CallId,
 					Name:   new(tc.Name),
-					Result: interactions.NewFunctionResultStepResultUnion([]interactions.FunctionResultSubcontent{
-						interactions.NewFunctionResultSubcontent(interactions.TextContent{Text: tc.Result}),
-					}),
+					Result: interactions.NewFunctionResultStepResultUnion(tc.Result),
 				}))
 			}
 		default:
@@ -471,34 +187,8 @@ func (c *Client) toInteractionsSteps(messages []models.Message) []interactions.S
 	return steps
 }
 
-func parseToolArgs(raw string) map[string]any {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return map[string]any{}
-	}
-	var args map[string]any
-	if err := json.Unmarshal([]byte(raw), &args); err != nil || args == nil {
-		return map[string]any{"raw": raw}
-	}
-	return args
-}
-
-func marshalArgs(args map[string]any) string {
-	if len(args) == 0 {
-		return "{}"
-	}
-	bs, err := json.Marshal(args)
-	if err != nil {
-		return "{}"
-	}
-	return string(bs)
-}
-
 func toInteractionsTools(tools []*tool.Tool) []interactions.Tool {
-	if len(tools) == 0 {
-		return nil
-	}
-	geminiTools := make([]interactions.Tool, 0, len(tools))
+	var res []interactions.Tool
 	for _, t := range tools {
 		var params map[string]any
 		if len(t.InputSchema) > 0 {
@@ -506,11 +196,18 @@ func toInteractionsTools(tools []*tool.Tool) []interactions.Tool {
 				panic(fmt.Sprintf("failed to unmarshal tool input schema for tool %s: %v", t.Name, err))
 			}
 		}
-		geminiTools = append(geminiTools, interactions.NewTool(interactions.Function{
+		res = append(res, interactions.NewTool(interactions.Function{
 			Name:        new(t.Name),
 			Description: t.Description,
 			Parameters:  params,
 		}))
 	}
-	return geminiTools
+	return res
+}
+
+func deref[T any](p *T) (zero T) {
+	if p == nil {
+		return zero
+	}
+	return *p
 }
