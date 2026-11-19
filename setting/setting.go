@@ -88,6 +88,11 @@ type Settings struct {
 	OpenAIBaseURL string
 	OpenAIApiKey  string
 	OpenAIModel   string
+
+	GeminiBaseURL    string
+	GeminiApiKey     string
+	GeminiModel      string
+	GeminiAPIVersion string
 }
 
 func Init() (*Settings, error) {
@@ -435,7 +440,7 @@ var allSettingDefs = []settingDef{
 	&flagDefImpl[string]{
 		name:       "llm-provider",
 		env:        new("AG_LLM_PROVIDER"),
-		desc:       "LLM provider to use, e.g. 'anthropic', or 'openai'",
+		desc:       "LLM provider to use, e.g. 'anthropic', 'openai', or 'gemini'",
 		fromStr:    strFromStr,
 		fromStrArr: strFromLastArg,
 		apply:      func(s *Settings, v string) error { return setLLmProvider(s, v) },
@@ -485,6 +490,43 @@ var allSettingDefs = []settingDef{
 		fromStr:    strFromStr,
 		fromStrArr: strFromLastArg,
 		apply:      func(s *Settings, v string) error { s.OpenAIModel = v; return nil },
+		defVal:     new(string),
+	},
+
+	&flagDefImpl[string]{
+		name:       "gemini-base-url",
+		env:        new("AG_GEMINI_BASE_URL"),
+		desc:       "Gemini API base URL",
+		fromStr:    strFromStr,
+		fromStrArr: strFromLastArg,
+		apply:      func(s *Settings, v string) error { s.GeminiBaseURL = v; return nil },
+		defVal:     new(string),
+	},
+	&flagDefImpl[string]{
+		name:       "gemini-api-key",
+		env:        new("AG_GEMINI_API_KEY"),
+		desc:       "Gemini API key (falls back to GEMINI_API_KEY / GOOGLE_API_KEY)",
+		fromStr:    strFromStr,
+		fromStrArr: strFromLastArg,
+		apply:      func(s *Settings, v string) error { s.GeminiApiKey = v; return nil },
+		defVal:     new(string),
+	},
+	&flagDefImpl[string]{
+		name:       "gemini-model",
+		env:        new("AG_GEMINI_MODEL"),
+		desc:       "Gemini model name, e.g. gemini-4-hydrogen",
+		fromStr:    strFromStr,
+		fromStrArr: strFromLastArg,
+		apply:      func(s *Settings, v string) error { s.GeminiModel = v; return nil },
+		defVal:     new(string),
+	},
+	&flagDefImpl[string]{
+		name:       "gemini-api-version",
+		env:        new("AG_GEMINI_API_VERSION"),
+		desc:       "Gemini API version, e.g. v1 or v1beta (falls back to GOOGLE_GENAI_API_VERSION)",
+		fromStr:    strFromStr,
+		fromStrArr: strFromLastArg,
+		apply:      func(s *Settings, v string) error { s.GeminiAPIVersion = v; return nil },
 		defVal:     new(string),
 	},
 }
@@ -659,6 +701,7 @@ type LllmProvider string
 const (
 	LlmProviderAnthropic LllmProvider = "anthropic"
 	LlmProviderOpenAI    LllmProvider = "openai"
+	LlmProviderGemini    LllmProvider = "gemini"
 )
 
 func setLLmProvider(p *Settings, provider string) error {
@@ -667,6 +710,8 @@ func setLLmProvider(p *Settings, provider string) error {
 		p.LlmProvider = LlmProviderAnthropic
 	case string(LlmProviderOpenAI):
 		p.LlmProvider = LlmProviderOpenAI
+	case string(LlmProviderGemini):
+		p.LlmProvider = LlmProviderGemini
 	default:
 		return fmt.Errorf("unsupported llm provider: %s", provider)
 	}

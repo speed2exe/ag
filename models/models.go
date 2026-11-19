@@ -52,7 +52,10 @@ type OutputText struct{ Text string }
 func (e *OutputText) isOutput() {}
 func (e *OutputText) isEvent()  {}
 
-type OutputReasoning struct{ Reasoning string }
+type OutputReasoning struct {
+	Reasoning string
+	Signature string
+}
 
 func (e *OutputReasoning) isOutput() {}
 func (e *OutputReasoning) isEvent()  {}
@@ -87,7 +90,10 @@ type UserPrompt struct{ Text string }
 
 func (m *UserPrompt) isMessage() {}
 
-type AgentReasoning struct{ Reasoning string }
+type AgentReasoning struct {
+	Reasoning string
+	Signature string `json:",omitempty"`
+}
 
 func (m *AgentReasoning) isMessage() {}
 
