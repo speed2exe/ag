@@ -30,14 +30,10 @@ type Client struct {
 }
 
 func New(log func(string), s *setting.Settings) (*Client, error) {
-	if s.GeminiModel == "" {
-		return nil, fmt.Errorf("missing gemini model: set --gemini-model or AG_GEMINI_MODEL")
-	}
 	cc := &genai.ClientConfig{
 		APIKey: s.GeminiApiKey,
 		HTTPOptions: genai.HTTPOptions{
-			BaseURL:    s.GeminiBaseURL,
-			APIVersion: s.GeminiAPIVersion,
+			BaseURL: s.GeminiBaseURL,
 		},
 	}
 	client, err := genai.NewClient(context.Background(), cc)
@@ -85,15 +81,14 @@ func (c *Client) GenerateStream(
 
 	body := interactions.CreateModelInteraction{
 		Model:  interactions.Model(c.model),
-		Input:  genai.Ptr(interactions.NewInteractionsInput(steps)),
-		Store:  genai.Ptr(false),
-		Stream: genai.Ptr(true),
+		Input:  new(interactions.NewInteractionsInput(steps)),
+		Stream: new(true),
 		GenerationConfig: &interactions.GenerationConfig{
 			ThinkingSummaries: interactions.ThinkingSummariesAuto.ToPointer(),
 		},
 	}
 	if sysInstruction := joinInstructions(instructions); sysInstruction != "" {
-		body.SystemInstruction = genai.Ptr(sysInstruction)
+		body.SystemInstruction = new(sysInstruction)
 	}
 	if len(geminiTools) > 0 {
 		body.Tools = geminiTools
@@ -141,7 +136,7 @@ func (c *Client) consumeStream(s *stream.EventStream[interactions.InteractionSSE
 		if activeThoughtIndex != -1 {
 			if activeThoughtSig != "" {
 				thought := interactions.ThoughtStep{
-					Signature: genai.Ptr(activeThoughtSig),
+					Signature: new(activeThoughtSig),
 				}
 				if activeThoughtSummary.Len() > 0 {
 					thought.Summary = []interactions.ThoughtSummaryContent{
@@ -463,7 +458,7 @@ func (c *Client) toInteractionsSteps(messages []models.Message) []interactions.S
 			for _, tc := range callItems {
 				steps = append(steps, interactions.NewStep(interactions.FunctionResultStep{
 					CallID: tc.CallId,
-					Name:   genai.Ptr(tc.Name),
+					Name:   new(tc.Name),
 					Result: interactions.NewFunctionResultStepResultUnion([]interactions.FunctionResultSubcontent{
 						interactions.NewFunctionResultSubcontent(interactions.TextContent{Text: tc.Result}),
 					}),

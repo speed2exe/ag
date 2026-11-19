@@ -89,10 +89,9 @@ type Settings struct {
 	OpenAIApiKey  string
 	OpenAIModel   string
 
-	GeminiBaseURL    string
-	GeminiApiKey     string
-	GeminiModel      string
-	GeminiAPIVersion string
+	GeminiBaseURL string
+	GeminiApiKey  string
+	GeminiModel   string
 }
 
 func Init() (*Settings, error) {
@@ -518,15 +517,6 @@ var allSettingDefs = []settingDef{
 		fromStr:    strFromStr,
 		fromStrArr: strFromLastArg,
 		apply:      func(s *Settings, v string) error { s.GeminiModel = v; return nil },
-		defVal:     new(string),
-	},
-	&flagDefImpl[string]{
-		name:       "gemini-api-version",
-		env:        new("AG_GEMINI_API_VERSION"),
-		desc:       "Gemini API version, e.g. v1 or v1beta (falls back to GOOGLE_GENAI_API_VERSION)",
-		fromStr:    strFromStr,
-		fromStrArr: strFromLastArg,
-		apply:      func(s *Settings, v string) error { s.GeminiAPIVersion = v; return nil },
 		defVal:     new(string),
 	},
 }
