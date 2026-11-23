@@ -231,7 +231,7 @@ func Lua() *tool.Tool {
 
 	return (&util.ToolForJsonInputOutput[models.LuaInput, models.LuaOutput]{
 		Name:        consts.LuaToolName,
-		Description: luaToolDescription(),
+		Description: new(`Executes Lua scripts and returns stdout, stderr, and the script's return value; multiple returned values are returned as an array.`),
 		Call:        call,
 	}).MustCompile()
 }
