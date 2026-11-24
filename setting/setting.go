@@ -67,6 +67,7 @@ type Settings struct {
 	SkillPaths                  []string
 	PreloadSkillPaths           []string
 	McpConfPaths                []string
+	A2aUrls                     []string
 	InstructionPath             string
 	SessionPath                 string
 	SessionKey                  string
@@ -397,6 +398,15 @@ var allSettingDefs = []settingDef{
 		fromStr:    strArrFromStr,
 		fromStrArr: strArrFromStrArr,
 		apply:      func(s *Settings, v []string) error { s.McpConfPaths = append(s.McpConfPaths, v...); return nil },
+		defVal:     &[]string{},
+	},
+	&flagDefImpl[[]string]{
+		name:       "a2a-urls",
+		env:        new("AG_A2A_URLS"),
+		desc:       "comma-separated list of a2a urls. See: https://a2a-protocol.org/latest/",
+		fromStr:    strArrFromStr,
+		fromStrArr: strArrFromStrArr,
+		apply:      func(s *Settings, v []string) error { s.A2aUrls = append(s.A2aUrls, v...); return nil },
 		defVal:     &[]string{},
 	},
 	&flagDefImpl[string]{

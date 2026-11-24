@@ -92,6 +92,11 @@ func buildTools(ctx context.Context, p *printer.Printer, s *setting.Settings) ma
 			res[tool.Name] = tool
 		}
 	}
+
+	if len(s.A2aUrls) > 0 {
+		// TODO: Add all a2a client method as tools
+	}
+
 	return res
 }
 
@@ -231,6 +236,9 @@ func buildInstructions(p *printer.Printer, settings *setting.Settings, skills *s
 	instructions = append(instructions, skill.BuildPreloadSkillInstructions(skills.PreloadSkillByFilePath)...)
 	if s := skill.BuildSkillInstructions(skills.SkillByFilePath); s != "" {
 		instructions = append(instructions, s)
+	}
+	if len(settings.A2aUrls) > 0 {
+		// TODO: add each a2a agent card here
 	}
 	return instructions
 }
