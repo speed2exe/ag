@@ -8,6 +8,7 @@ import (
 	"github.com/speed2exe/ag/setting"
 	"github.com/speed2exe/ag/store"
 	"github.com/speed2exe/ag/tool"
+	"github.com/speed2exe/ag/tool/a2a"
 	"github.com/speed2exe/ag/tool/skill"
 )
 
@@ -17,6 +18,7 @@ type State struct {
 	Llm         llm.Model
 	ToolsByName map[string]*tool.Tool
 	Skills      *skill.Skills
+	A2a         *a2a.Clients
 	CtxStore    *store.CtxStore
 }
 

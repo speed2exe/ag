@@ -1,9 +1,12 @@
 package skill
 
 import (
+	"slices"
+	"sort"
 	"strings"
 
 	"encoding/json/v2"
+
 	"github.com/speed2exe/ag/setting"
 )
 
@@ -44,6 +47,11 @@ func BuildSkillInstructions(ss map[string]*Skill) string {
 		skillsList = append(skillsList, skill)
 	}
 
+	// sort to retain order (same skill -> same instruction -> cache hit)
+	sort.Slice(skillsList, func(i, j int) bool {
+		return skillsList[i].FilePath < skillsList[j].FilePath
+	})
+
 	var b strings.Builder
 	b.WriteString("You have access to the following skills. ")
 	b.WriteString("To activate a skill, read the respective SKILL.md.\n")
@@ -60,5 +68,9 @@ func BuildPreloadSkillInstructions(ss map[string]string) []string {
 	for _, content := range ss {
 		res = append(res, content)
 	}
+
+	// sort to retain order (same skill -> same instruction -> cache hit)
+	slices.Sort(res)
+
 	return res
 }

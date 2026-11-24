@@ -11,6 +11,7 @@ import (
 	"github.com/speed2exe/ag/printer"
 	"github.com/speed2exe/ag/state"
 	"github.com/speed2exe/ag/tool"
+	"github.com/speed2exe/ag/tool/a2a"
 	"github.com/speed2exe/ag/tool/skill"
 	"github.com/speed2exe/ag/util"
 )
@@ -22,10 +23,14 @@ func Agent() *tool.Tool {
 		defer state.Printer.UnIndent()
 
 		// set sub tools
+		hasA2aTool := false
 		subTaskToolByName := make(map[string]*tool.Tool, len(input.ToolNames))
 		for _, subToolName := range input.ToolNames {
 			if subTool, ok := state.ToolsByName[subToolName]; ok {
 				subTaskToolByName[subToolName] = subTool
+				if strings.HasPrefix(subToolName, a2a.ToolPrefix) {
+					hasA2aTool = true
+				}
 			} else {
 				return nil, fmt.Errorf("tool %s not found", subToolName)
 			}
@@ -60,6 +65,11 @@ func Agent() *tool.Tool {
 		}
 		if s := skill.BuildSkillInstructions(subSkill.SkillByFilePath); s != "" {
 			instructions = append(instructions, s)
+		}
+		if hasA2aTool {
+			if s := state.A2a.BuildInstructions(); s != "" {
+				instructions = append(instructions, s)
+			}
 		}
 		nextCtxId, eventStream := core.GenerateStream(ctx, state.Llm, util.ToolSortedListFromMap(subTaskToolByName), instructions, "", input.Prompts)
 		eventPrinter := llm.NewEventPrinter(state.Printer)

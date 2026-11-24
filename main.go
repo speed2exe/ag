@@ -23,6 +23,7 @@ import (
 	"github.com/speed2exe/ag/state"
 	"github.com/speed2exe/ag/store"
 	"github.com/speed2exe/ag/tool"
+	"github.com/speed2exe/ag/tool/a2a"
 	"github.com/speed2exe/ag/tool/builtin"
 	"github.com/speed2exe/ag/tool/mcp"
 	"github.com/speed2exe/ag/tool/skill"
@@ -57,18 +58,21 @@ func mainErr(ctx context.Context, p *printer.Printer) error {
 		return fmt.Errorf("failed to initialize LLM client: %w", err)
 	}
 	skills := skill.New(settings, p.Log)
-	toolsByName := buildTools(ctx, p, settings)
+	a2aClients := a2a.New(ctx, p.Log, settings.A2aUrls)
+	defer a2aClients.Close()
+	toolsByName := buildTools(ctx, p, settings, a2aClients)
 
 	ctx = state.WithState(ctx, &state.State{
 		Printer:     p,
 		Settings:    settings,
 		ToolsByName: toolsByName,
 		Skills:      skills,
+		A2a:         a2aClients,
 		Llm:         model,
 		CtxStore:    store.NewCtxStore(settings.ContextDir),
 	})
 
-	instructions := buildInstructions(p, settings, skills)
+	instructions := buildInstructions(p, settings, skills, a2aClients)
 	if setting.StdinIsTerm {
 		runInteractive(ctx, p, llm.NewEventPrinter(p), settings, model, toolsByName, instructions)
 	} else {
@@ -77,7 +81,7 @@ func mainErr(ctx context.Context, p *printer.Printer) error {
 	return nil
 }
 
-func buildTools(ctx context.Context, p *printer.Printer, s *setting.Settings) map[string]*tool.Tool {
+func buildTools(ctx context.Context, p *printer.Printer, s *setting.Settings, a2aClients *a2a.Clients) map[string]*tool.Tool {
 	res := map[string]*tool.Tool{
 		consts.BashToolName:  builtin.Bash(),
 		consts.AgentToolName: builtin.Agent(),
@@ -93,8 +97,12 @@ func buildTools(ctx context.Context, p *printer.Printer, s *setting.Settings) ma
 		}
 	}
 
-	if len(s.A2aUrls) > 0 {
-		// TODO: Add all a2a client method as tools
+	for _, t := range a2aClients.Tools() {
+		if _, exists := res[t.Name]; exists {
+			p.Print(printer.ColorYellow, fmt.Sprintf("warning: tool %s already exists, skipping\n", t.Name), printer.Reset)
+			continue
+		}
+		res[t.Name] = t
 	}
 
 	return res
@@ -223,7 +231,7 @@ func AddHistory(prompt ...string) {
 	}
 }
 
-func buildInstructions(p *printer.Printer, settings *setting.Settings, skills *skill.Skills) []string {
+func buildInstructions(p *printer.Printer, settings *setting.Settings, skills *skill.Skills, a2aClients *a2a.Clients) []string {
 	instructions := []string{}
 	// instructions = append(instructions, fmt.Sprintf("env: %s", strings.Join(os.Environ(), "\n")))
 	// instructions = append(instructions, fmt.Sprintf("args: %s", strings.Join(os.Args, "\n")))
@@ -237,8 +245,8 @@ func buildInstructions(p *printer.Printer, settings *setting.Settings, skills *s
 	if s := skill.BuildSkillInstructions(skills.SkillByFilePath); s != "" {
 		instructions = append(instructions, s)
 	}
-	if len(settings.A2aUrls) > 0 {
-		// TODO: add each a2a agent card here
+	if s := a2aClients.BuildInstructions(); s != "" {
+		instructions = append(instructions, s)
 	}
 	return instructions
 }
