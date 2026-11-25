@@ -3,6 +3,7 @@ package llm
 import (
 	"encoding/json/v2"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 	"unicode"
@@ -15,27 +16,13 @@ import (
 	"github.com/speed2exe/ag/util"
 )
 
-type outputType int
-
-const (
-	outputTypeNone outputType = iota
-	outputTypeText
-	outputTypeThought
-	outputTypeFnCall
-	outputTypeFnArgs
-	outputTypeErr
-)
-
 type EventPrinter struct {
 	printer *printer.Printer
 
-	currentOutputType outputType
+	prevOutputType    reflect.Type
+	currentOutputType reflect.Type
 
-	textBuf          strings.Builder
-	textNewLineCount int
-	terminalWidth    int
-	currentWidth     int
-
+	textBuf         strings.Builder
 	toolCallName    string
 	toolCallArgsBuf strings.Builder
 
@@ -98,14 +85,49 @@ func (ep *EventPrinter) stopSpinner() {
 func (ep *EventPrinter) Print(event models.Event) {
 	ep.stopSpinner()
 
-	if out, ok := event.(models.Output); ok {
-		ep.printOutput(out)
-		return
+	ep.prevOutputType = ep.currentOutputType
+	if _, ok := event.(models.Output); ok {
+		ep.currentOutputType = reflect.TypeOf(event)
+	} else {
+		ep.currentOutputType = nil
 	}
 
-	ep.finishOutput()
+	isNew := ep.prevOutputType != ep.currentOutputType
+	if isNew {
+		ep.finishPrevOutput()
+	}
 
 	switch e := event.(type) {
+	case *models.OutputText:
+		if isNew {
+			ep.printer.Print(printer.BgWhite, " ", printer.Reset, " ")
+		}
+		ep.textBuf.WriteString(e.Text)
+		ep.printer.Print(e.Text)
+	case *models.OutputReasoning:
+		if isNew {
+			ep.printer.Print(printer.BgBrightBlack, " ", printer.Reset, " ", printer.ColorBrightBlack)
+		}
+		ep.printer.Print(e.Reasoning)
+	case *models.OutputFnCall:
+		if isNew {
+			ep.printer.Print(printer.ColorBlue, "$ ")
+		}
+		ep.toolCallName = e.Name
+		ep.printer.Print(printer.ColorGreen, e.Name)
+	case *models.OutputFnArgs:
+		if isNew {
+			ep.printer.Print(printer.ColorCyan)
+		}
+		if ep.toolCallName == consts.BashToolName || ep.toolCallName == consts.LuaToolName {
+			ep.toolCallArgsBuf.WriteString(e.Args)
+		}
+		ep.printer.Print(e.Args)
+	case *models.OutputErr:
+		if isNew {
+			ep.printer.Print(printer.BgRed, " ", printer.Reset, " ", printer.ColorRed)
+		}
+		ep.printer.Print(e.Err)
 	case *models.Spin:
 		ep.spin()
 	case *models.Log:
@@ -117,6 +139,10 @@ func (ep *EventPrinter) Print(event models.Event) {
 			ep.printToolCallResult(toolCall)
 		}
 		ep.spin()
+	default:
+		if ep.currentOutputType != nil {
+			panic(fmt.Sprintf("unsupported event type: %T", event))
+		}
 	}
 }
 
@@ -136,70 +162,9 @@ func (ep *EventPrinter) AccumulatePrint(usage *models.TokenUsage) {
 
 func (ep *EventPrinter) FinishCurrentOutput() {
 	ep.stopSpinner()
-	ep.finishOutput()
-}
-
-func (ep *EventPrinter) setOutputType(next outputType) {
-	if ep.currentOutputType == next {
-		return
-	}
-	ep.finishOutput()
-	switch next {
-	case outputTypeText:
-		if width := util.GetTerminalWidth(); width > 0 {
-			ep.terminalWidth = width
-		}
-		ep.printer.Print(printer.BgWhite, " ", printer.Reset, " ")
-		ep.currentWidth = 2 + (ep.printer.GetIndent() * 2)
-	case outputTypeThought:
-		ep.printer.Print(printer.BgBrightBlack, " ", printer.Reset, " ", printer.ColorBrightBlack)
-	case outputTypeFnCall:
-		ep.printer.Print(printer.ColorBlue, "$ ")
-	case outputTypeFnArgs:
-		ep.printer.Print(printer.ColorCyan)
-	case outputTypeErr:
-		ep.printer.Print(printer.BgRed, " ", printer.Reset, " ", printer.ColorRed)
-	}
-	ep.currentOutputType = next
-}
-
-func (ep *EventPrinter) printOutput(event models.Output) {
-	switch e := event.(type) {
-	case *models.OutputText:
-		ep.setOutputType(outputTypeText)
-		ep.textBuf.WriteString(e.Text)
-		for _, char := range e.Text {
-			if char == '\n' {
-				ep.textNewLineCount++
-				ep.currentWidth = ep.printer.GetIndent() * 2
-			} else {
-				ep.currentWidth += runewidth.RuneWidth(char)
-				if ep.terminalWidth > 0 && ep.currentWidth >= ep.terminalWidth {
-					ep.textNewLineCount++
-					ep.currentWidth = 0
-				}
-			}
-		}
-		ep.printer.Print(e.Text)
-	case *models.OutputReasoning:
-		ep.setOutputType(outputTypeThought)
-		ep.printer.Print(e.Reasoning)
-	case *models.OutputFnCall:
-		ep.setOutputType(outputTypeFnCall)
-		ep.toolCallName = e.Name
-		ep.printer.Print(printer.ColorGreen, e.Name)
-	case *models.OutputFnArgs:
-		ep.setOutputType(outputTypeFnArgs)
-		if ep.toolCallName == consts.BashToolName || ep.toolCallName == consts.LuaToolName {
-			ep.toolCallArgsBuf.WriteString(e.Args)
-		}
-		ep.printer.Print(e.Args)
-	case *models.OutputErr:
-		ep.setOutputType(outputTypeErr)
-		ep.printer.Print(e.Err)
-	default:
-		panic(fmt.Sprintf("unsupported event type: %T", event))
-	}
+	ep.prevOutputType = ep.currentOutputType
+	ep.currentOutputType = nil
+	ep.finishPrevOutput()
 }
 
 func (ep *EventPrinter) printToolResult(resultStr string) {
@@ -265,32 +230,30 @@ func (ep *EventPrinter) printToolCallResult(toolCall *models.ToolCall) {
 	}
 }
 
-func (ep *EventPrinter) finishOutput() {
-	switch ep.currentOutputType {
-	case outputTypeNone, outputTypeFnCall:
-	case outputTypeText:
+func (ep *EventPrinter) finishPrevOutput() {
+	switch ep.prevOutputType {
+	case nil, reflect.TypeFor[*models.OutputFnCall]():
+	case reflect.TypeFor[*models.OutputText]():
+		text := ep.textBuf.String()
+		ep.textBuf.Reset()
 		termWidth := util.GetTerminalWidth()
 		leftOffset := ep.printer.GetIndent() * 2
-		if rendered, err := util.RenderText(termWidth-leftOffset, ep.textBuf.String()); err != nil {
+		if rendered, err := util.RenderText(termWidth-leftOffset, text); err != nil {
 			log.Errorf("failed to render markdown: %v", err)
 		} else {
-			ep.printer.Print(clearLines(ep.textNewLineCount), printer.BgWhite, " ", printer.Reset, " ", rendered)
-			ep.textNewLineCount = 0
+			ep.printer.Print(clearLines(countTextLines(text, termWidth, leftOffset)), printer.BgWhite, " ", printer.Reset, " ", rendered)
 		}
-		ep.textBuf.Reset()
 		ep.printer.Print("\n")
 
-	case outputTypeFnArgs:
+	case reflect.TypeFor[*models.OutputFnArgs]():
 		ep.finishFnArgs()
 
-	case outputTypeThought, outputTypeErr:
+	case reflect.TypeFor[*models.OutputReasoning](), reflect.TypeFor[*models.OutputErr]():
 		ep.printer.Print(printer.Reset, "\n")
 
 	default:
-		panic(fmt.Sprintf("unsupported event type: %d", ep.currentOutputType))
+		panic(fmt.Sprintf("unsupported event type: %v", ep.prevOutputType))
 	}
-
-	ep.currentOutputType = outputTypeNone
 }
 
 func (ep *EventPrinter) finishFnArgs() {
@@ -327,6 +290,24 @@ func (ep *EventPrinter) finishFnArgs() {
 
 func clearLines(count int) string {
 	return strings.Repeat(printer.ClearLine+printer.Up1Line, count) + printer.ClearLine + "\r"
+}
+
+func countTextLines(text string, termWidth, leftOffset int) int {
+	lines := 0
+	col := 2 + leftOffset
+	for _, r := range text {
+		if r == '\n' {
+			lines++
+			col = leftOffset
+			continue
+		}
+		col += runewidth.RuneWidth(r)
+		if termWidth > 0 && col >= termWidth {
+			lines++
+			col = 0
+		}
+	}
+	return lines
 }
 
 func countWrappedLines(termWidth, charCount int) int {
