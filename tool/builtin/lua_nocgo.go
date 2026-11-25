@@ -8,12 +8,11 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/mmcdole/lunar"
 	"github.com/speed2exe/ag/consts"
 	"github.com/speed2exe/ag/models"
 	"github.com/speed2exe/ag/tool"
 	"github.com/speed2exe/ag/util"
-
-	"github.com/mmcdole/lunar"
 )
 
 func Lua() *tool.Tool {
@@ -37,22 +36,23 @@ func Lua() *tool.Tool {
 		if err != nil {
 			return nil, fmt.Errorf("failed to execute Lua script: %w", err)
 		}
+
 		var result any
-		if len(results) == 1 {
-			result, err = luaValueToJSON(results[0], nil, 0)
-			if err != nil {
-				return nil, fmt.Errorf("failed to capture Lua result: %w", err)
-			}
-		} else if len(results) > 1 {
+		if len(results) > 0 {
 			values := make([]any, len(results))
-			for index, value := range results {
-				values[index], err = luaValueToJSON(value, nil, 0)
+			for i, value := range results {
+				values[i], err = luaValueToJSON(value, nil, 0)
 				if err != nil {
 					return nil, fmt.Errorf("failed to capture Lua result: %w", err)
 				}
 			}
-			result = values
+			if len(values) == 1 {
+				result = values[0]
+			} else {
+				result = values
+			}
 		}
+
 		return &models.LuaOutput{
 			Stdout: stdoutBuf.String(),
 			Stderr: stderrBuf.String(),
@@ -62,7 +62,7 @@ func Lua() *tool.Tool {
 
 	return (&util.ToolForJsonInputOutput[models.LuaInput, models.LuaOutput]{
 		Name:        consts.LuaToolName,
-		Description: luaToolDescription(),
+		Description: new(luaToolDescription),
 		Call:        call,
 	}).MustCompile()
 }
@@ -81,7 +81,6 @@ func luaTableToJSON(table *lua.Table, ancestors []lua.Value, depth int) (any, er
 
 	object := make(map[string]any)
 	array := make(map[int]any)
-	hasStringKeys, hasIntegerKeys := false, false
 	previous := lua.Nil()
 	for {
 		key, value, ok, err := table.Next(previous)
@@ -98,40 +97,24 @@ func luaTableToJSON(table *lua.Table, ancestors []lua.Value, depth int) (any, er
 			if err != nil {
 				return nil, err
 			}
-			hasStringKeys = true
 			object[name] = converted
 		case lua.NumberKind:
 			number, _ := key.AsNumber()
-			if math.IsNaN(number) || math.IsInf(number, 0) || math.Trunc(number) != number ||
-				number < 1 || number >= float64(int(^uint(0)>>1)) {
+			idx, ok := luaTableIndex(number)
+			if !ok {
 				return nil, fmt.Errorf("Lua tool argument table keys must be strings or positive integer indices")
 			}
 			converted, err := luaValueToJSON(value, ancestors, depth+1)
 			if err != nil {
 				return nil, err
 			}
-			hasIntegerKeys = true
-			array[int(number)] = converted
+			array[idx] = converted
 		default:
 			return nil, fmt.Errorf("Lua tool argument table keys must be strings or positive integer indices")
 		}
 		previous = key
 	}
-	if hasStringKeys && hasIntegerKeys {
-		return nil, fmt.Errorf("Lua tool argument tables cannot mix object and array keys")
-	}
-	if !hasIntegerKeys {
-		return object, nil
-	}
-	values := make([]any, len(array))
-	for i := range values {
-		value, ok := array[i+1]
-		if !ok {
-			return nil, fmt.Errorf("Lua tool argument arrays must use contiguous integer keys starting at 1")
-		}
-		values[i] = value
-	}
-	return values, nil
+	return finalizeLuaTable(object, array)
 }
 
 func luaValueToJSON(value lua.Value, ancestors []lua.Value, depth int) (any, error) {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/speed2exe/ag/consts"
 	"github.com/speed2exe/ag/core"
 	"github.com/speed2exe/ag/llm"
 	"github.com/speed2exe/ag/models"
@@ -18,71 +19,63 @@ import (
 
 func Agent() *tool.Tool {
 	call := func(ctx context.Context, input *models.AgentInput) (*models.AgentOutput, error) {
-		state := state.GetState(ctx)
-		state.Printer.Indent()
-		defer state.Printer.UnIndent()
+		st := state.GetState(ctx)
+		st.Printer.Indent()
+		defer st.Printer.UnIndent()
 
-		// set sub tools
 		hasA2aTool := false
-		subTaskToolByName := make(map[string]*tool.Tool, len(input.ToolNames))
-		for _, subToolName := range input.ToolNames {
-			if subTool, ok := state.ToolsByName[subToolName]; ok {
-				subTaskToolByName[subToolName] = subTool
-				if strings.HasPrefix(subToolName, a2a.ToolPrefix) {
-					hasA2aTool = true
-				}
-			} else {
-				return nil, fmt.Errorf("tool %s not found", subToolName)
+		subTools := make(map[string]*tool.Tool, len(input.ToolNames))
+		for _, name := range input.ToolNames {
+			subTool, ok := st.ToolsByName[name]
+			if !ok {
+				return nil, fmt.Errorf("tool %s not found", name)
+			}
+			subTools[name] = subTool
+			if strings.HasPrefix(name, a2a.ToolPrefix) {
+				hasA2aTool = true
 			}
 		}
-		orginalTools := state.ToolsByName
-		state.ToolsByName = subTaskToolByName
-		defer func() {
-			state.ToolsByName = orginalTools
-		}()
 
-		// set sub skills
-		subSkill := &skill.Skills{
-			SkillByFilePath:        map[string]*skill.Skill{},
-			PreloadSkillByFilePath: state.Skills.PreloadSkillByFilePath,
+		subSkills := &skill.Skills{
+			SkillByFilePath:        make(map[string]*skill.Skill, len(input.SkillPaths)),
+			PreloadSkillByFilePath: st.Skills.PreloadSkillByFilePath,
 		}
-		for _, subSkillPath := range input.SkillPaths {
-			if skill, ok := state.Skills.SkillByFilePath[subSkillPath]; ok {
-				subSkill.SkillByFilePath[subSkillPath] = skill
-			} else {
-				return nil, fmt.Errorf("skill %s not found", subSkillPath)
+		for _, path := range input.SkillPaths {
+			s, ok := st.Skills.SkillByFilePath[path]
+			if !ok {
+				return nil, fmt.Errorf("skill %s not found", path)
 			}
+			subSkills.SkillByFilePath[path] = s
 		}
-		orginalSkills := state.Skills
-		state.Skills = subSkill
-		defer func() {
-			state.Skills = orginalSkills
-		}()
+
+		// Attach a scoped copy of State so the subagent cannot mutate the parent's tools/skills.
+		subState := *st
+		subState.ToolsByName = subTools
+		subState.Skills = subSkills
+		subCtx := state.WithState(ctx, &subState)
 
 		var instructions []string
-		if ss := skill.BuildPreloadSkillInstructions(subSkill.PreloadSkillByFilePath); len(ss) > 0 {
-			instructions = append(instructions, ss...)
-		}
-		if s := skill.BuildSkillInstructions(subSkill.SkillByFilePath); s != "" {
+		instructions = append(instructions, skill.BuildPreloadSkillInstructions(subSkills.PreloadSkillByFilePath)...)
+		if s := skill.BuildSkillInstructions(subSkills.SkillByFilePath); s != "" {
 			instructions = append(instructions, s)
 		}
 		if hasA2aTool {
-			if s := state.A2a.BuildInstructions(); s != "" {
+			if s := st.A2a.BuildInstructions(); s != "" {
 				instructions = append(instructions, s)
 			}
 		}
-		nextCtxId, eventStream := core.GenerateStream(ctx, state.Llm, util.ToolSortedListFromMap(subTaskToolByName), instructions, "", input.Prompts)
-		eventPrinter := llm.NewEventPrinter(state.Printer)
-		lastResponseText := &lastResponseText{}
 
+		nextCtxId, eventStream := core.GenerateStream(subCtx, st.Llm, util.ToolSortedListFromMap(subTools), instructions, "", input.Prompts)
+		eventPrinter := llm.NewEventPrinter(st.Printer)
+		lastResponse := &lastResponseText{}
 		lastOutputErr := &llm.LastOutputError{}
 		util.StreamActions(eventStream,
 			eventPrinter.Print,
-			lastResponseText.collectLastText,
+			lastResponse.collectLastText,
 			lastOutputErr.Set,
 		)
 		eventPrinter.FinishCurrentOutput()
-		state.Printer.Print(printer.ColorPurple, fmt.Sprintf("--context-id %s\n", nextCtxId), printer.Reset)
+		st.Printer.Print(printer.ColorPurple, fmt.Sprintf("--context-id %s\n", nextCtxId), printer.Reset)
 
 		if lastOutputErr.Err != nil {
 			return &models.AgentOutput{
@@ -90,9 +83,8 @@ func Agent() *tool.Tool {
 			}, nil
 		}
 
-		finalAnswer := lastResponseText.last
 		return &models.AgentOutput{
-			LastResponseText:           finalAnswer,
+			LastResponseText:           lastResponse.text(),
 			TotalInputTokens:           eventPrinter.TotalInputTokens,
 			TotalInputTokensCached:     eventPrinter.TotalInputTokensCached,
 			TotalOutputTokens:          eventPrinter.TotalOutputTokens,
@@ -101,7 +93,7 @@ func Agent() *tool.Tool {
 	}
 
 	return (&util.ToolForJsonInputOutput[models.AgentInput, models.AgentOutput]{
-		Name:        "agent",
+		Name:        consts.AgentToolName,
 		Description: new("Delegate task to an subagent that DOES NOT have context of the parent agent, and can only use the tools and skills provided."),
 		Call:        call,
 	}).MustCompile()
@@ -113,13 +105,17 @@ type lastResponseText struct {
 }
 
 func (l *lastResponseText) collectLastText(event models.Event) {
-	switch e := event.(type) {
-	case *models.OutputText:
+	if e, ok := event.(*models.OutputText); ok {
 		l.acc.WriteString(e.Text)
-	default:
-		if l.acc.Len() > 0 {
-			l.last = l.acc.String()
-			l.acc.Reset()
-		}
+	} else if l.acc.Len() > 0 {
+		l.last = l.acc.String()
+		l.acc.Reset()
 	}
+}
+
+func (l *lastResponseText) text() string {
+	if l.acc.Len() > 0 {
+		return l.acc.String()
+	}
+	return l.last
 }

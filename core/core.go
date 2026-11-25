@@ -3,7 +3,6 @@ package core
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -27,11 +26,11 @@ func GenerateStream(ctx context.Context,
 	ctxId string,
 	prompt string,
 ) (string, <-chan models.Event) {
-	state := state.GetState(ctx)
+	st := state.GetState(ctx)
 	userPrompt := &models.UserPrompt{Text: prompt}
-	messages, err := getMessagesFromContextId(state.CtxStore, ctxId)
+	messages, err := getMessagesFromContextId(st.CtxStore, ctxId)
 	if err != nil {
-		state.Printer.Print(printer.ColorRed, fmt.Sprintf("failed to get context for id %s: %v", ctxId, err), printer.Reset)
+		st.Printer.Print(printer.ColorRed, fmt.Sprintf("failed to get context for id %s: %v", ctxId, err), printer.Reset)
 	}
 	newCtxId := time.Now().Format(time.RFC3339Nano)
 
@@ -39,32 +38,30 @@ func GenerateStream(ctx context.Context,
 	go func() {
 		defer close(events)
 
-		contextRecorder := &ContextRecorder{store: state.CtxStore}
-		if len(messages) > state.Settings.MaxMessagesBeforeUserPrompt {
+		contextRecorder := &ContextRecorder{store: st.CtxStore}
+		if len(messages) > st.Settings.MaxMessagesBeforeUserPrompt {
 			summary, err := summarizeMessagesBeforeUserPrompt(ctx, model, messages, events)
 			if err != nil {
-				state.Printer.Print(printer.ColorRed, fmt.Sprintf("failed to summarize messages: %v", err), printer.Reset)
-				// only take the last MaxMessagesBeforeUserPrompt messages and use them as context.
-				// the recorder and the model both keep mutating their own messages, so
-				// they must never share a backing array.
-				trimmed := messages[len(messages)-state.Settings.MaxMessagesBeforeUserPrompt:]
-				contextRecorder.setMessages(slices.Clone(trimmed))
+				st.Printer.Print(printer.ColorRed, fmt.Sprintf("failed to summarize messages: %v", err), printer.Reset)
+				// Only take the last MaxMessagesBeforeUserPrompt messages as context.
+				// The recorder and model mutate their own slices, so clone them separately.
+				trimmed := messages[len(messages)-st.Settings.MaxMessagesBeforeUserPrompt:]
+				contextRecorder.messages = slices.Clone(trimmed)
 				messages = slices.Clone(trimmed)
 			} else {
-				contextRecorder.setMessages([]models.Message{summary})
-				// replace messages with summary, add last message (assistant response) to the end of the messages slice
-				// this is to ensure that the last assistant response is not lost when summarizing, case when assistant asked a question
+				contextRecorder.messages = []models.Message{summary}
+				// Keep the last assistant message after the summary so a pending question isn't lost.
 				messages = append(make([]models.Message, 0, 2), summary, messages[len(messages)-1])
 			}
 		} else if ctxId != "" {
-			contextRecorder.setMessages([]models.Message{&models.ContextId{Id: ctxId}})
+			contextRecorder.messages = []models.Message{&models.ContextId{Id: ctxId}}
 		}
 
-		// lastly, add in current user prompt
-		contextRecorder.append(userPrompt)
+		// Add current user prompt.
+		contextRecorder.messages = append(contextRecorder.messages, userPrompt)
 		messages = append(messages, userPrompt)
 
-		innerEvents := util.FeedChan(generateStream(ctx, model, tools, instructions, messages, contextRecorder), events)
+		innerEvents := util.FeedChan(generateStream(ctx, model, tools, instructions, messages), events)
 		events <- &models.Spin{}
 		util.StreamActions(innerEvents, contextRecorder.record)
 		if err := contextRecorder.saveToStore(newCtxId); err != nil {
@@ -76,44 +73,72 @@ func GenerateStream(ctx context.Context,
 	return newCtxId, events
 }
 
+type compactRequestKey struct{}
+
+type compactRequest struct {
+	mu           sync.Mutex
+	requested    bool
+	instructions string
+}
+
+// RequestCompact schedules conversation compaction for the active GenerateStream
+// loop bound to ctx. It returns false if ctx is not associated with an active loop.
+func RequestCompact(ctx context.Context, instructions string) bool {
+	req, ok := ctx.Value(compactRequestKey{}).(*compactRequest)
+	if !ok || req == nil {
+		return false
+	}
+	req.mu.Lock()
+	defer req.mu.Unlock()
+	req.requested = true
+	if trimmed := strings.TrimSpace(instructions); trimmed != "" {
+		if req.instructions != "" {
+			req.instructions += "\n"
+		}
+		req.instructions += trimmed
+	}
+	return true
+}
+
+func (r *compactRequest) take() (bool, string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.requested {
+		return false, ""
+	}
+	instructions := r.instructions
+	r.requested = false
+	r.instructions = ""
+	return true, instructions
+}
+
 func generateStream(ctx context.Context,
 	model llm.Model,
 	tools []*tool.Tool,
 	instructions []string,
 	messages []models.Message,
-	contextRecorder *ContextRecorder,
 ) <-chan models.Event {
-	state := state.GetState(ctx)
+	st := state.GetState(ctx)
+	compactReq := &compactRequest{}
+	ctx = context.WithValue(ctx, compactRequestKey{}, compactReq)
 
 	events := make(chan models.Event, 1)
 	go func() {
 		defer close(events)
 		for {
-			// check context cancellation
-			select {
-			case <-ctx.Done():
+			if ctx.Err() != nil {
 				return
-			default:
 			}
 
-			if len(messages) > state.Settings.MaxMessagesAfterUserPrompt {
-				summary, err := summarizeMessagesAfterUserPrompt(ctx, model, messages, events)
-				if err != nil {
-					state.Printer.Print(printer.ColorRed, fmt.Sprintf("failed to summarize messages: %v", err), printer.Reset)
-				} else {
-					// the context recorder appends to its own messages from another
-					// goroutine, so it must not share a backing array with the
-					// messages that are sent to the model.
-					messages = summary
-					contextRecorder.setMessages(slices.Clone(summary))
-				}
+			var ok bool
+			if messages, ok = maybeCompactMessages(ctx, st, model, compactReq, messages, events); !ok {
+				return
 			}
 
 			curEvents := util.FeedChan(model.GenerateStream(ctx, instructions, tools, messages), events)
 			toolCallExtractor := &ToolCallExtractor{toolCalls: &models.ToolCalls{}}
-			lastOutputErr := &llm.LastOutputError{}
 			outputCollector := &OutputCollector{}
-			util.StreamActions(curEvents, toolCallExtractor.extract, lastOutputErr.Set, outputCollector.collect)
+			util.StreamActions(curEvents, toolCallExtractor.extract, outputCollector.collect)
 
 			outputCollector.finalize()
 			messages = append(messages, outputCollector.messages...)
@@ -125,35 +150,10 @@ func generateStream(ctx context.Context,
 			}
 
 			for _, toolCall := range toolCalls.Items {
-				// check context cancellation
-				select {
-				case <-ctx.Done():
+				if ctx.Err() != nil {
 					return
-				default:
 				}
-
-				tool, ok := lookupToolByName(tools, toolCall.Name)
-				if !ok {
-					if toolCaller, ok := model.(llm.ToolCaller); ok {
-						result, found, err := execLlmToolCall(ctx, toolCaller, toolCall.Name, toolCall.Args)
-						if !found {
-							toolCall.Result = fmt.Sprintf("tool %s not found", toolCall.Name)
-						} else if err != nil {
-							toolCall.Result = fmt.Sprintf("failed to call tool %s: %v", toolCall.Name, err)
-						} else {
-							toolCall.Result = result
-						}
-					} else {
-						toolCall.Result = fmt.Sprintf("tool %s not found", toolCall.Name)
-					}
-				} else {
-					output, err := execToolCall(ctx, tool, []byte(toolCall.Args))
-					if err != nil {
-						toolCall.Result = fmt.Sprintf("failed to call tool %s: %v", toolCall.Name, err)
-					} else {
-						toolCall.Result = string(output)
-					}
-				}
+				toolCall.Result = executeToolCall(ctx, model, tools, toolCall)
 			}
 
 			events <- toolCalls
@@ -164,38 +164,90 @@ func generateStream(ctx context.Context,
 	return events
 }
 
-func execLlmToolCall(ctx context.Context, llmToolCaller llm.ToolCaller, toolName, toolArgs string) (string, bool, error) {
+// maybeCompactMessages compacts or summarizes messages when requested by the
+// compact tool or when the message count exceeds MaxMessagesAfterUserPrompt.
+// It returns ok=false only if ctx was cancelled.
+func maybeCompactMessages(
+	ctx context.Context,
+	st *state.State,
+	model llm.Model,
+	compactReq *compactRequest,
+	messages []models.Message,
+	events chan<- models.Event,
+) ([]models.Message, bool) {
 	var (
-		result string
-		found  bool
+		next   []models.Message
 		err    error
+		action string
 	)
-	done := make(chan struct{}, 1)
-	go func() {
-		result, found, err = llmToolCaller.CallTool(ctx, toolName, toolArgs)
-		done <- struct{}{}
-	}()
-	select {
-	case <-ctx.Done():
-		return "", false, fmt.Errorf("llm tool call cancelled: %w", ctx.Err())
-	case <-done:
-		return result, found, err
+	if requested, compactInstructions := compactReq.take(); requested {
+		action = "compact"
+		next, err = compactMessages(ctx, model, messages, compactInstructions, events)
+	} else if len(messages) > st.Settings.MaxMessagesAfterUserPrompt {
+		action = "summarize"
+		next, err = summarizeMessagesAfterUserPrompt(ctx, model, messages, events)
+	} else {
+		return messages, true
 	}
+
+	if err != nil {
+		if ctx.Err() != nil {
+			return messages, false
+		}
+		st.Printer.Print(printer.ColorRed, fmt.Sprintf("failed to %s messages: %v", action, err), printer.Reset)
+		return messages, true
+	}
+
+	events <- &models.Compacted{Messages: slices.Clone(next)}
+	events <- &models.Spin{}
+	return next, true
 }
 
-func execToolCall(ctx context.Context, tool *tool.Tool, args []byte) ([]byte, error) {
+func executeToolCall(ctx context.Context, model llm.Model, tools []*tool.Tool, tc *models.ToolCall) string {
+	if t, ok := lookupToolByName(tools, tc.Name); ok {
+		output, err := runWithContext(ctx, "tool call cancelled", func() ([]byte, error) {
+			return t.Call(ctx, []byte(tc.Args))
+		})
+		if err != nil {
+			return fmt.Sprintf("failed to call tool %s: %v", tc.Name, err)
+		}
+		return string(output)
+	}
+
+	if toolCaller, ok := model.(llm.ToolCaller); ok {
+		type llmResult struct {
+			output string
+			found  bool
+		}
+		res, err := runWithContext(ctx, "llm tool call cancelled", func() (llmResult, error) {
+			out, found, err := toolCaller.CallTool(ctx, tc.Name, tc.Args)
+			return llmResult{output: out, found: found}, err
+		})
+		if err != nil {
+			return fmt.Sprintf("failed to call tool %s: %v", tc.Name, err)
+		}
+		if res.found {
+			return res.output
+		}
+	}
+
+	return fmt.Sprintf("tool %s not found", tc.Name)
+}
+
+func runWithContext[T any](ctx context.Context, cancelMsg string, fn func() (T, error)) (T, error) {
 	var (
-		result []byte
+		result T
 		err    error
 	)
 	done := make(chan struct{}, 1)
 	go func() {
 		defer func() { done <- struct{}{} }()
-		result, err = tool.Call(ctx, args)
+		result, err = fn()
 	}()
 	select {
 	case <-ctx.Done():
-		return nil, fmt.Errorf("tool call cancelled: %w", ctx.Err())
+		var zero T
+		return zero, fmt.Errorf("%s: %w", cancelMsg, ctx.Err())
 	case <-done:
 		return result, err
 	}
@@ -255,73 +307,56 @@ func (t *ToolCallExtractor) finalize() {
 }
 
 // ContextRecorder records the messages of a conversation so that they can be
-// used as context in later turns. It is written to from two goroutines: the one
-// consuming the event stream (record/append) and the one driving the model
-// (setMessages, when the messages are summarized and compacted), so messages is
-// guarded by mu.
+// used as context in later turns.
 type ContextRecorder struct {
 	outputAccumulator outputAccumulator
 	store             *store.CtxStore
-	mu                sync.Mutex
 	messages          []models.Message
 }
 
-func (c *ContextRecorder) setMessages(messages []models.Message) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.messages = messages
-}
-
-func (c *ContextRecorder) append(messages ...models.Message) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.messages = append(c.messages, messages...)
-}
-
 func (c *ContextRecorder) record(event models.Event) {
-	// the accumulator is only touched by the event stream goroutine
-	collected := c.outputAccumulator.collect(event)
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.messages = append(c.messages, collected...)
+	if e, ok := event.(*models.Compacted); ok {
+		// Discard any output accumulated from summarization before replacing messages.
+		c.outputAccumulator = outputAccumulator{}
+		c.messages = slices.Clone(e.Messages)
+		return
+	}
+	c.messages = append(c.messages, c.outputAccumulator.collect(event)...)
 	switch e := event.(type) {
-	case *models.OutputErr:
-		c.messages = append(c.messages, e)
-	case *models.ToolCalls:
-		c.messages = append(c.messages, e)
-
+	case *models.OutputErr, *models.ToolCalls:
+		c.messages = append(c.messages, e.(models.Message))
 	}
 }
 
 func (c *ContextRecorder) saveToStore(ctxId string) error {
-	// the accumulator is only touched by the event stream goroutine
-	c.mu.Lock()
 	c.messages = append(c.messages, c.outputAccumulator.finalize()...)
-	messages := slices.Clone(c.messages)
-	c.mu.Unlock()
-	return c.store.Save(ctxId, messages)
+	return c.store.Save(ctxId, c.messages)
 }
 
 type outputAccumulator struct {
-	previousEvent      models.Event
 	outputReasoningAcc strings.Builder
 	outputTextAcc      strings.Builder
 }
 
 func (o *outputAccumulator) collect(event models.Event) []models.Message {
-	var messages []models.Message
-	if reflect.TypeOf(event) != reflect.TypeOf(o.previousEvent) {
-		messages = o.finalize()
-	}
-	o.previousEvent = event
-
 	switch e := event.(type) {
 	case *models.OutputReasoning:
+		var messages []models.Message
+		if o.outputTextAcc.Len() > 0 {
+			messages = o.finalize()
+		}
 		o.outputReasoningAcc.WriteString(e.Reasoning)
+		return messages
 	case *models.OutputText:
+		var messages []models.Message
+		if o.outputReasoningAcc.Len() > 0 {
+			messages = o.finalize()
+		}
 		o.outputTextAcc.WriteString(e.Text)
+		return messages
+	default:
+		return o.finalize()
 	}
-	return messages
 }
 
 func (o *outputAccumulator) finalize() []models.Message {
@@ -358,11 +393,7 @@ func summarizeMessagesBeforeUserPrompt(ctx context.Context, model llm.Model, mes
 		listener <- &models.Log{Text: "Finished summarizing messages."}
 	}()
 
-	summary, err := summarizeMessagesWithPrompt(ctx, model, messagesBeforeUserPrompt, consts.SummarizerBeforeLastUserPrompt, listener)
-	if err != nil {
-		return nil, err
-	}
-	return summary, nil
+	return summarizeMessagesWithPrompt(ctx, model, messagesBeforeUserPrompt, consts.SummarizerBeforeLastUserPrompt, listener)
 }
 
 func summarizeMessagesAfterUserPrompt(ctx context.Context, model llm.Model, allMessages []models.Message, listener chan<- models.Event) ([]models.Message, error) {
@@ -372,15 +403,8 @@ func summarizeMessagesAfterUserPrompt(ctx context.Context, model llm.Model, allM
 		listener <- &models.Log{Text: "Finished summarizing messages."}
 	}()
 
-	// get index of last user prompt
-	lastUserPromptIndex := -1
-	for i, allMessage := range slices.Backward(allMessages) {
-		if _, ok := allMessage.(*models.UserPrompt); ok {
-			lastUserPromptIndex = i
-			break
-		}
-	}
-	if lastUserPromptIndex == -1 {
+	idx := lastUserPromptIndex(allMessages)
+	if idx == -1 {
 		return nil, fmt.Errorf("no user prompt found in messages")
 	}
 
@@ -388,18 +412,48 @@ func summarizeMessagesAfterUserPrompt(ctx context.Context, model llm.Model, allM
 	if err != nil {
 		return nil, err
 	}
-	// build a fresh slice: appending to allMessages[:lastUserPromptIndex+1] would
-	// write into the caller's backing array, which is still being mutated by the
-	// context recorder goroutine.
-	messages := make([]models.Message, 0, lastUserPromptIndex+2)
-	messages = append(messages, allMessages[:lastUserPromptIndex+1]...)
+	// Build a fresh slice rather than appending onto a subslice of allMessages.
+	messages := make([]models.Message, 0, idx+2)
+	messages = append(messages, allMessages[:idx+1]...)
 	messages = append(messages, summary)
 	return messages, nil
 }
 
+func compactMessages(ctx context.Context, model llm.Model, allMessages []models.Message, instructions string, listener chan<- models.Event) ([]models.Message, error) {
+	listener <- &models.Log{Text: "Compacting conversation messages..."}
+	listener <- &models.Spin{}
+	defer func() {
+		listener <- &models.Log{Text: "Finished compacting messages."}
+	}()
+
+	prompt := consts.SummarizerCompact
+	if instructions != "" {
+		prompt += "\n\n# CALLER COMPACTION INSTRUCTIONS\nThe agent requested special focus for this compaction (follow these unless they conflict with accuracy rules or would drop critical constraints/resumption state):\n" + instructions
+	}
+
+	summary, err := summarizeMessagesWithPrompt(ctx, model, allMessages, prompt, listener)
+	if err != nil {
+		return nil, err
+	}
+
+	// Preserve the latest user prompt (if present) followed by the compacted summary.
+	if idx := lastUserPromptIndex(allMessages); idx != -1 {
+		return []models.Message{allMessages[idx], summary}, nil
+	}
+	return []models.Message{summary}, nil
+}
+
+func lastUserPromptIndex(messages []models.Message) int {
+	for i, msg := range slices.Backward(messages) {
+		if _, ok := msg.(*models.UserPrompt); ok {
+			return i
+		}
+	}
+	return -1
+}
+
 func summarizeMessagesWithPrompt(ctx context.Context, model llm.Model, messages []models.Message, summaryPrompt string, listener chan<- models.Event) (*models.Summary, error) {
-	// copy the messages before appending the summarization prompt, otherwise the
-	// prompt is written into the caller's backing array (beyond its length).
+	// Copy messages before appending the summarization prompt to avoid mutating the caller's backing array.
 	request := make([]models.Message, 0, len(messages)+1)
 	request = append(request, messages...)
 	request = append(request, &models.UserPrompt{Text: summaryPrompt})

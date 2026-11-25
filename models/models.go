@@ -36,6 +36,15 @@ type LuaOutput struct {
 	Result any    `json:"result,omitempty"`
 }
 
+type CompactInput struct {
+	Instructions string `json:"instructions,omitempty" jsonschema:"Optional guidance on what to prioritize or preserve when compacting the conversation history."`
+}
+
+type CompactOutput struct {
+	Compacted bool   `json:"compacted"`
+	Message   string `json:"message"`
+}
+
 type Event interface{ isEvent() }
 
 type Output interface{ isOutput() }
@@ -117,3 +126,7 @@ func (l *Log) isEvent() {}
 type Spin struct{}
 
 func (s *Spin) isEvent() {}
+
+type Compacted struct{ Messages []Message }
+
+func (c *Compacted) isEvent() {}

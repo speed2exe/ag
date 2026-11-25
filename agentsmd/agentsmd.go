@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -23,9 +24,8 @@ const filename = "AGENTS.md"
 // Load discovers and concatenates all AGENTS.md files reachable from dir,
 // walking up to the git root. Returns an empty string when none are found.
 func Load(log func(msg string), dir string) string {
-	dirs := collectDirs(dir)
 	var sections []string
-	for _, d := range dirs {
+	for _, d := range collectDirs(dir) {
 		content, err := os.ReadFile(filepath.Join(d, filename))
 		if err != nil {
 			continue
@@ -36,16 +36,7 @@ func Load(log func(msg string), dir string) string {
 	if len(sections) == 0 {
 		return ""
 	}
-
-	var b strings.Builder
-	b.WriteString("The following project instructions come from ")
-	b.WriteString(filename)
-	b.WriteString(" files found in this project:\n\n")
-	for _, s := range sections {
-		b.WriteString(s)
-		b.WriteString("\n\n")
-	}
-	return strings.TrimRight(b.String(), "\n")
+	return "The following project instructions come from " + filename + " files found in this project:\n\n" + strings.Join(sections, "\n\n")
 }
 
 // collectDirs returns directories from the git root down to dir (inclusive),
@@ -73,9 +64,7 @@ func collectDirs(dir string) []string {
 	}
 
 	// Reverse so outermost (git root) is first.
-	for i, j := 0, len(chain)-1; i < j; i, j = i+1, j-1 {
-		chain[i], chain[j] = chain[j], chain[i]
-	}
+	slices.Reverse(chain)
 	return chain
 }
 

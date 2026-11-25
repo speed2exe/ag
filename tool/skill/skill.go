@@ -1,11 +1,11 @@
 package skill
 
 import (
-	"slices"
-	"sort"
-	"strings"
-
+	"cmp"
 	"encoding/json/v2"
+	"maps"
+	"slices"
+	"strings"
 
 	"github.com/speed2exe/ag/setting"
 )
@@ -15,7 +15,7 @@ type Skills struct {
 	PreloadSkillByFilePath map[string]string
 }
 
-// Init loads skills from the configured skill paths and stores them in Skills.
+// New loads skills from the configured skill paths and stores them in Skills.
 func New(settings *setting.Settings, log func(s string)) *Skills {
 	return &Skills{
 		SkillByFilePath:        LoadFromPaths(log, settings.SkillPaths),
@@ -42,14 +42,10 @@ func BuildSkillInstructions(ss map[string]*Skill) string {
 	if len(ss) == 0 {
 		return ""
 	}
-	skillsList := make([]*Skill, 0, len(ss))
-	for _, skill := range ss {
-		skillsList = append(skillsList, skill)
-	}
-
-	// sort to retain order (same skill -> same instruction -> cache hit)
-	sort.Slice(skillsList, func(i, j int) bool {
-		return skillsList[i].FilePath < skillsList[j].FilePath
+	skillsList := slices.Collect(maps.Values(ss))
+	// Sort to keep prompt order deterministic for prompt cache hits.
+	slices.SortFunc(skillsList, func(a, b *Skill) int {
+		return cmp.Compare(a.FilePath, b.FilePath)
 	})
 
 	var b strings.Builder
@@ -64,13 +60,8 @@ func BuildPreloadSkillInstructions(ss map[string]string) []string {
 	if len(ss) == 0 {
 		return nil
 	}
-	var res []string
-	for _, content := range ss {
-		res = append(res, content)
-	}
-
-	// sort to retain order (same skill -> same instruction -> cache hit)
+	res := slices.Collect(maps.Values(ss))
+	// Sort to keep prompt order deterministic for prompt cache hits.
 	slices.Sort(res)
-
 	return res
 }

@@ -12,6 +12,8 @@ import (
 	"github.com/speed2exe/ag/tool/skill"
 )
 
+type stateKey struct{}
+
 type State struct {
 	Printer     *printer.Printer
 	Settings    *setting.Settings
@@ -23,14 +25,10 @@ type State struct {
 }
 
 func WithState(ctx context.Context, state *State) context.Context {
-	return context.WithValue(ctx, "state", state)
+	return context.WithValue(ctx, stateKey{}, state)
 }
 
 func GetState(ctx context.Context) *State {
-	if state := ctx.Value("state"); state != nil {
-		if s, ok := state.(*State); ok {
-			return s
-		}
-	}
-	return nil
+	s, _ := ctx.Value(stateKey{}).(*State)
+	return s
 }

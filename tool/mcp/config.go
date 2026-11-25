@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"maps"
@@ -11,15 +12,9 @@ import (
 	"strings"
 	"sync"
 
-	"encoding/json/v2"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-
 	"github.com/speed2exe/ag/tool"
 )
-
-type McpFromConfig struct {
-	toolsByMcp map[string][]*tool.Tool
-}
 
 // ServerConfig represents a single MCP server entry in an mcp.json config file.
 // Exactly one of URL (Streamable HTTP / SSE transport) or Command (stdio transport) must be set.
@@ -51,7 +46,7 @@ func NewMcpFromConfig(ctx context.Context, log func(string), configPaths []strin
 	cfg := loadMcpConfig(log, configPaths)
 	impl := &mcp.Implementation{}
 
-	mu := sync.Mutex{}
+	var mu sync.Mutex
 	toolsByServeName := map[string][]*tool.Tool{}
 
 	var wg sync.WaitGroup
@@ -78,7 +73,7 @@ func toolsFromServer(ctx context.Context, log func(string), cfg *ServerConfig, i
 
 	switch {
 	case cfg.URL != "" && cfg.Command != "":
-		return nil, errors.New("only one of \"url\" or \"command\" may be set")
+		return nil, errors.New(`only one of "url" or "command" may be set`)
 	case cfg.URL != "":
 		switch strings.ToLower(cfg.Type) {
 		case "sse":
@@ -97,7 +92,7 @@ func toolsFromServer(ctx context.Context, log func(string), cfg *ServerConfig, i
 		cmd.Env = buildEnv(cfg.Env)
 		transport = &mcp.CommandTransport{Command: cmd}
 	default:
-		return nil, errors.New("one of \"url\" or \"command\" must be set")
+		return nil, errors.New(`one of "url" or "command" must be set`)
 	}
 
 	client := mcp.NewClient(impl, nil)
@@ -159,10 +154,9 @@ func convertGoSDKTool(session *mcp.ClientSession, cfg *ServerConfig, mt *mcp.Too
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal input schema: %w", err)
 	}
-	desc := mt.Description
 	return &tool.Tool{
 		Name:        fmt.Sprintf("%s_%s", cfg.Name, mt.Name),
-		Description: &desc,
+		Description: new(mt.Description),
 		InputSchema: schema,
 		Call:        sessionCallFunc(session, mt.Name),
 	}, nil
@@ -200,34 +194,18 @@ func extractGoSDKText(contents []mcp.Content) string {
 	return sb.String()
 }
 
-// loadMcpConfig reads mcp json config from file paths
-// merging them with project-level entries taking
-// newer order precedence over older ones. Returns a merged Config.
+// loadMcpConfig reads mcp json configs from filePaths and merges them in order,
+// with later configs overriding earlier ones.
 func loadMcpConfig(log func(string), filePaths []string) *Config {
-	configs := make([]*Config, 0, len(filePaths))
-
+	merged := &Config{MCPServers: make(map[string]*ServerConfig)}
 	for _, name := range filePaths {
 		cfg, err := loadConfig(name)
 		if err != nil {
 			log(fmt.Sprintf("warning: failed to load MCP config %q: %v; skipping\n", name, err))
 			continue
 		}
-		configs = append(configs, cfg)
-	}
-
-	if len(configs) == 0 {
-		return &Config{MCPServers: make(map[string]*ServerConfig)}
-	} else if len(configs) == 1 {
-		return configs[0]
-	}
-
-	merged := configs[0]
-
-	// Merge configs in order, with later configs overriding earlier ones.
-	for _, cfg := range configs[1:] {
 		maps.Copy(merged.MCPServers, cfg.MCPServers)
 	}
-
 	return merged
 }
 
@@ -241,9 +219,12 @@ func loadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to unmarshal MCP config %q: %w", path, err)
 	}
 	for k, v := range cfg.MCPServers {
+		if v == nil {
+			delete(cfg.MCPServers, k)
+			continue
+		}
 		v.Name = k
 		v.Path = path
-		cfg.MCPServers[k] = v
 	}
 	return &cfg, nil
 }
@@ -251,9 +232,7 @@ func loadConfig(path string) (*Config, error) {
 // buildEnv merges the current process environment with the extra key=value
 // pairs from the server config, returning a combined slice suitable for exec.Cmd.
 func buildEnv(extra map[string]string) []string {
-	base := os.Environ()
-	result := make([]string, len(base), len(base)+len(extra))
-	copy(result, base)
+	result := os.Environ()
 	for k, v := range extra {
 		result = append(result, k+"="+v)
 	}

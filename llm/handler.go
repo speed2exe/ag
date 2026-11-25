@@ -2,56 +2,43 @@ package llm
 
 import (
 	"bytes"
+	"encoding/json/v2"
 	"fmt"
 	"strings"
 	"time"
 	"unicode"
 
+	"github.com/mattn/go-runewidth"
 	"github.com/speed2exe/ag/consts"
 	"github.com/speed2exe/ag/log"
 	"github.com/speed2exe/ag/models"
 	"github.com/speed2exe/ag/printer"
 	"github.com/speed2exe/ag/util"
-
-	"encoding/json/v2"
-	"github.com/mattn/go-runewidth"
 )
 
-type EventType int
+type outputType int
 
 const (
-	EventTypeUninitialized EventType = iota
-	EventTypeInput
-	EventTypeOutput
-	EventTypeOthers
-)
-
-type OutputType int
-
-const (
-	OutputTypeUninitialized OutputType = iota
-	OutputTypeText
-	OuputTypeThought
-	OutputTypeFnCall
-	OutputTypeFnArgs
-	OutputTypeErr
+	outputTypeNone outputType = iota
+	outputTypeText
+	outputTypeThought
+	outputTypeFnCall
+	outputTypeFnArgs
+	outputTypeErr
 )
 
 type EventPrinter struct {
 	printer *printer.Printer
 
-	currentEventType  EventType
-	currentOutputType OutputType
+	currentOutputType outputType
 
 	textBuf          strings.Builder
 	textNewLineCount int
 	terminalWidth    int
 	currentWidth     int
 
-	toolCount           int
-	toolCallName        string
-	bashToolCallJsonBuf bytes.Buffer
-	luaToolCallJsonBuf  bytes.Buffer
+	toolCallName    string
+	toolCallArgsBuf bytes.Buffer
 
 	TotalInputTokens           int
 	TotalInputTokensCached     int
@@ -68,7 +55,6 @@ func NewEventPrinter(p *printer.Printer) *EventPrinter {
 }
 
 func (ep *EventPrinter) spin() {
-	// if already spinning, do nothing
 	if ep.isSpinning {
 		return
 	}
@@ -78,17 +64,19 @@ func (ep *EventPrinter) spin() {
 	ep.spinDone = make(chan struct{})
 	ep.isSpinning = true
 
-	timeNow := time.Now()
+	start := time.Now()
 	go func() {
 		defer close(ep.spinDone)
+		ticker := time.NewTicker(177 * time.Millisecond)
+		defer ticker.Stop()
 		for {
 			select {
 			case <-ep.stopSpin:
-				ep.printer.Print(printer.ClearLine, printer.ColorYellow, fmt.Sprintf("\r[Elapsed: %s]", time.Since(timeNow).Truncate(time.Millisecond)), printer.Reset, "\n")
+				ep.printer.Print(printer.ClearLine, printer.ColorYellow, fmt.Sprintf("\r[Elapsed: %s]", time.Since(start).Truncate(time.Millisecond)), printer.Reset, "\n")
 				ep.isSpinning = false
 				return
-			case <-time.After(177 * time.Millisecond):
-				ep.printer.Print(printer.ClearLine, printer.ColorYellow, fmt.Sprintf("\r[Elapsed: %s]", time.Since(timeNow).Truncate(time.Millisecond)), printer.Reset)
+			case <-ticker.C:
+				ep.printer.Print(printer.ClearLine, printer.ColorYellow, fmt.Sprintf("\r[Elapsed: %s]", time.Since(start).Truncate(time.Millisecond)), printer.Reset)
 				ep.printer.Flush()
 			}
 		}
@@ -108,51 +96,31 @@ func (ep *EventPrinter) stopSpinner() {
 func (ep *EventPrinter) Print(event models.Event) {
 	ep.stopSpinner()
 
-	previousEventType := ep.currentEventType
-
-	// finish output event if the new event is not output, or the output type is changed
-	switch event.(type) {
-	case models.Output:
-		ep.currentEventType = EventTypeOutput
-	default:
-		if previousEventType == EventTypeOutput {
-			ep.FinishCurrentOutput()
-		}
-		switch event.(type) {
-		case models.Input:
-			ep.currentEventType = EventTypeInput
-		default:
-			ep.currentEventType = EventTypeOthers
-		}
+	if out, ok := event.(models.Output); ok {
+		ep.printOutput(out)
+		return
 	}
+
+	ep.finishOutput(ep.currentOutputType)
 
 	switch e := event.(type) {
 	case *models.Spin:
 		ep.spin()
 	case *models.Log:
 		ep.printer.Print(printer.BgYellow, " ", printer.Reset, " ", printer.ColorYellow, e.Text, printer.Reset, "\n")
-		return
 	case *models.TokenUsage:
 		ep.AccumulatePrint(e)
-		return
-	}
-
-	switch e := event.(type) {
 	case models.Input:
 		ep.printInput(e)
-	case models.Output:
-		ep.printOutput(e)
 	}
 }
 
 func (ep *EventPrinter) AccumulatePrint(usage *models.TokenUsage) {
-	// Accumulate the token usage into the total counts
 	ep.TotalInputTokens += usage.InputTokens
 	ep.TotalInputTokensCached += usage.InputTokensCached
 	ep.TotalOutputTokens += usage.OutputTokens
 	ep.TotalOutputTokensReasoning += usage.OutputTokensReasoning
 
-	// Print the token usage for this event
 	ep.printer.Print(printer.BgYellow, " ", printer.Reset, " ", printer.ColorYellow,
 		fmt.Sprintf("tokens in: %d (cached: %d) out: %d (reasoning: %d) | total in: %d (cached: %d) out: %d (reasoning: %d)\n",
 			usage.InputTokens, usage.InputTokensCached, usage.OutputTokens, usage.OutputTokensReasoning,
@@ -167,31 +135,27 @@ func (ep *EventPrinter) FinishCurrentOutput() {
 }
 
 func (ep *EventPrinter) printOutput(event models.Output) {
-	previousOutputType := ep.currentOutputType
-
-	var currentOutputType OutputType
-	// set event type
+	var nextType outputType
 	switch event.(type) {
 	case *models.OutputUnknown:
 	case *models.OutputText:
-		currentOutputType = OutputTypeText
+		nextType = outputTypeText
 	case *models.OutputReasoning:
-		currentOutputType = OuputTypeThought
+		nextType = outputTypeThought
 	case *models.OutputFnCall:
-		currentOutputType = OutputTypeFnCall
+		nextType = outputTypeFnCall
 	case *models.OutputFnArgs:
-		currentOutputType = OutputTypeFnArgs
+		nextType = outputTypeFnArgs
 	case *models.OutputErr:
-		currentOutputType = OutputTypeErr
+		nextType = outputTypeErr
 	default:
 		panic(fmt.Sprintf("unsupported event type: %T", event))
 	}
 
-	// if there is a change in event type, finish the previous event and start the new event
-	if previousOutputType != currentOutputType {
-		ep.finishOutput(previousOutputType)
-		ep.startEvent(currentOutputType)
-		ep.currentOutputType = currentOutputType
+	if ep.currentOutputType != nextType {
+		ep.finishOutput(ep.currentOutputType)
+		ep.startEvent(nextType)
+		ep.currentOutputType = nextType
 	}
 
 	ep.processOutput(event)
@@ -206,93 +170,92 @@ func (ep *EventPrinter) printInput(input models.Input) {
 	case *models.InputUnknown:
 	case *models.ToolCalls:
 		for _, toolCall := range in.Items {
-			resultStr := toolCall.Result
-			switch toolCall.Name {
-			case consts.LuaToolName:
-				var luaOutput models.LuaOutput
-				if err := json.Unmarshal([]byte(toolCall.Result), &luaOutput); err != nil {
-					log.Errorf(fmt.Sprintf("invalid lua output JSON: %v", err))
-					ep.printToolResult(resultStr)
-					break
-				}
-				sb := strings.Builder{}
-				if luaOutput.Stderr != "" {
-					sb.WriteString(printer.ColorRed)
-					fmt.Fprintf(&sb, " %s ", luaOutput.Stderr)
-					sb.WriteString(printer.Reset)
-				}
-				sb.WriteString(luaOutput.Stdout)
-				if luaOutput.Result != nil {
-					if luaOutput.Stdout != "" {
-						sb.WriteByte('\n')
-					}
-					result, err := json.Marshal(luaOutput.Result)
-					if err != nil {
-						log.Errorf("failed to marshal Lua result: %v", err)
-					} else {
-						sb.Write(result)
-					}
-				}
-				ep.printToolResult(sb.String())
-			case consts.BashToolName:
-				var bashOutput models.BashOutput
-				if err := json.Unmarshal([]byte(toolCall.Result), &bashOutput); err != nil {
-					log.Errorf(fmt.Sprintf("invalid bash_command output JSON: %v", err))
-					ep.printToolResult(resultStr)
-					break
-				}
-				sb := strings.Builder{}
-				if bashOutput.ExitCode != 0 {
-					sb.WriteString(printer.BgRed)
-					fmt.Fprintf(&sb, " %v ", bashOutput.ExitCode)
-					sb.WriteString(printer.Reset)
-				}
-				if bashOutput.Stderr != "" {
-					sb.WriteString(printer.ColorRed)
-					fmt.Fprintf(&sb, " %s ", bashOutput.Stderr)
-					sb.WriteString(printer.Reset)
-				}
-				sb.WriteString(bashOutput.Stdout)
-				ep.printToolResult(sb.String())
-			case consts.AgentToolName:
-				var agentOutput models.AgentOutput
-				if err := json.Unmarshal([]byte(toolCall.Result), &agentOutput); err != nil {
-					log.Errorf("invalid agent output JSON: %v", err)
-					break
-				}
-				ep.TotalInputTokens += agentOutput.TotalInputTokens
-				ep.TotalInputTokensCached += agentOutput.TotalInputTokensCached
-				ep.TotalOutputTokens += agentOutput.TotalOutputTokens
-				ep.TotalOutputTokensReasoning += agentOutput.TotalOutputTokensReasoning
-			default:
-				ep.printToolResult(resultStr)
-			}
+			ep.printToolCallResult(toolCall)
 		}
 		ep.spin()
-
 	default:
 		panic(fmt.Sprintf("unsupported input type: %T", input))
 	}
 }
 
-func (ep *EventPrinter) finishOutput(eventType OutputType) {
+func (ep *EventPrinter) printToolCallResult(toolCall *models.ToolCall) {
+	switch toolCall.Name {
+	case consts.LuaToolName:
+		var luaOutput models.LuaOutput
+		if err := json.Unmarshal([]byte(toolCall.Result), &luaOutput); err != nil {
+			log.Errorf("invalid lua output JSON: %v", err)
+			ep.printToolResult(toolCall.Result)
+			return
+		}
+		var sb strings.Builder
+		if luaOutput.Stderr != "" {
+			sb.WriteString(printer.ColorRed)
+			fmt.Fprintf(&sb, " %s ", luaOutput.Stderr)
+			sb.WriteString(printer.Reset)
+		}
+		sb.WriteString(luaOutput.Stdout)
+		if luaOutput.Result != nil {
+			if luaOutput.Stdout != "" {
+				sb.WriteByte('\n')
+			}
+			result, err := json.Marshal(luaOutput.Result)
+			if err != nil {
+				log.Errorf("failed to marshal Lua result: %v", err)
+			} else {
+				sb.Write(result)
+			}
+		}
+		ep.printToolResult(sb.String())
+
+	case consts.BashToolName:
+		var bashOutput models.BashOutput
+		if err := json.Unmarshal([]byte(toolCall.Result), &bashOutput); err != nil {
+			log.Errorf("invalid bash_command output JSON: %v", err)
+			ep.printToolResult(toolCall.Result)
+			return
+		}
+		var sb strings.Builder
+		if bashOutput.ExitCode != 0 {
+			sb.WriteString(printer.BgRed)
+			fmt.Fprintf(&sb, " %v ", bashOutput.ExitCode)
+			sb.WriteString(printer.Reset)
+		}
+		if bashOutput.Stderr != "" {
+			sb.WriteString(printer.ColorRed)
+			fmt.Fprintf(&sb, " %s ", bashOutput.Stderr)
+			sb.WriteString(printer.Reset)
+		}
+		sb.WriteString(bashOutput.Stdout)
+		ep.printToolResult(sb.String())
+
+	case consts.AgentToolName:
+		var agentOutput models.AgentOutput
+		if err := json.Unmarshal([]byte(toolCall.Result), &agentOutput); err != nil {
+			log.Errorf("invalid agent output JSON: %v", err)
+			return
+		}
+		ep.TotalInputTokens += agentOutput.TotalInputTokens
+		ep.TotalInputTokensCached += agentOutput.TotalInputTokensCached
+		ep.TotalOutputTokens += agentOutput.TotalOutputTokens
+		ep.TotalOutputTokensReasoning += agentOutput.TotalOutputTokensReasoning
+
+	default:
+		ep.printToolResult(toolCall.Result)
+	}
+}
+
+func (ep *EventPrinter) finishOutput(eventType outputType) {
 	switch eventType {
-	case OutputTypeUninitialized:
-	case OutputTypeText:
+	case outputTypeNone, outputTypeFnCall:
+	case outputTypeText:
 		termWidth, _, _ := util.GetTerminalSize()
 		leftOffset := ep.printer.GetIndent() * 2
 		rendered, err := util.RenderText(termWidth-leftOffset, ep.textBuf.String())
 		if err != nil {
 			log.Errorf("failed to render markdown: %v", err)
 		} else {
-			// move the cursor up to the beginning of the text block to overwrite it with the rendered markdown
 			ep.printer.PrintWithScratch(func(s *bytes.Buffer) {
-				for range ep.textNewLineCount {
-					s.WriteString(printer.ClearLine)
-					s.WriteString(printer.Up1Line)
-				}
-				s.WriteString(printer.ClearLine)
-				s.WriteString("\r")
+				clearLines(s, ep.textNewLineCount)
 				s.WriteString(printer.BgWhite)
 				s.WriteString(" ")
 				s.WriteString(printer.Reset)
@@ -302,74 +265,79 @@ func (ep *EventPrinter) finishOutput(eventType OutputType) {
 			ep.textNewLineCount = 0
 		}
 		ep.textBuf.Reset()
-
 		ep.printer.Print("\n")
-	case OutputTypeFnCall:
-		ep.toolCount++
-	case OutputTypeFnArgs:
-		switch ep.toolCallName {
-		case consts.BashToolName:
-			var input models.BashInput
-			if err := json.Unmarshal(ep.bashToolCallJsonBuf.Bytes(), &input); err != nil {
-				log.Errorf("invalid bash_command input JSON: %v", err)
-			} else {
-				termWidth, _, _ := util.GetTerminalSize()
-				numLineCount := countLinesDownNoNewLine(2 + len(consts.BashToolName) + runewidth.StringWidth(ep.bashToolCallJsonBuf.String()))
-				ep.printer.PrintWithScratch(func(s *bytes.Buffer) {
-					for range numLineCount {
-						s.WriteString(printer.ClearLine)
-						s.WriteString(printer.Up1Line)
-					}
-					s.WriteString(printer.ClearLine)
-					s.WriteString("\r")
-					s.WriteString(printer.ColorBlue)
-					s.WriteString("$ ")
-					s.WriteString(printer.Reset)
-					s.WriteString(util.MustRenderCodeBlock("bash", termWidth, input.Command))
-					s.WriteString("\n")
-				})
-			}
-			ep.bashToolCallJsonBuf.Reset()
-		case consts.LuaToolName:
-			var input models.LuaInput
-			if err := json.Unmarshal(ep.luaToolCallJsonBuf.Bytes(), &input); err != nil {
-				log.Errorf("invalid lua input JSON: %v", err)
-			} else {
-				termWidth, _, _ := util.GetTerminalSize()
-				numLineCount := countLinesDownNoNewLine(2 + len(consts.LuaToolName) + runewidth.StringWidth(ep.luaToolCallJsonBuf.String()))
-				ep.printer.PrintWithScratch(func(s *bytes.Buffer) {
-					for range numLineCount {
-						s.WriteString(printer.ClearLine)
-						s.WriteString(printer.Up1Line)
-					}
-					s.WriteString(printer.ClearLine)
-					s.WriteString("\r")
-					s.WriteString(printer.ColorPurple)
-					s.WriteString("$ ")
-					s.WriteString(input.Name)
-					s.WriteString(printer.Reset)
-					s.WriteString("\n")
-					s.WriteString(util.MustRenderCodeBlock("lua", termWidth, input.Script))
-					s.WriteString("\n")
-				})
-			}
-			ep.luaToolCallJsonBuf.Reset()
-		default:
-			ep.printer.Print(printer.Reset, "\n")
-		}
-	case OuputTypeThought, OutputTypeErr:
+
+	case outputTypeFnArgs:
+		ep.finishFnArgs()
+
+	case outputTypeThought, outputTypeErr:
 		ep.printer.Print(printer.Reset, "\n")
+
 	default:
 		panic(fmt.Sprintf("unsupported event type: %d", eventType))
 	}
 
-	ep.currentOutputType = OutputTypeUninitialized
+	ep.currentOutputType = outputTypeNone
 }
 
-func (ep *EventPrinter) startEvent(eventType OutputType) {
+func (ep *EventPrinter) finishFnArgs() {
+	defer ep.toolCallArgsBuf.Reset()
+
+	switch ep.toolCallName {
+	case consts.BashToolName:
+		var input models.BashInput
+		if err := json.Unmarshal(ep.toolCallArgsBuf.Bytes(), &input); err != nil {
+			log.Errorf("invalid bash_command input JSON: %v", err)
+			return
+		}
+		termWidth, _, _ := util.GetTerminalSize()
+		numLineCount := countLinesDownNoNewLine(2 + len(consts.BashToolName) + runewidth.StringWidth(ep.toolCallArgsBuf.String()))
+		ep.printer.PrintWithScratch(func(s *bytes.Buffer) {
+			clearLines(s, numLineCount)
+			s.WriteString(printer.ColorBlue)
+			s.WriteString("$ ")
+			s.WriteString(printer.Reset)
+			s.WriteString(util.MustRenderCodeBlock("bash", termWidth, input.Command))
+			s.WriteString("\n")
+		})
+
+	case consts.LuaToolName:
+		var input models.LuaInput
+		if err := json.Unmarshal(ep.toolCallArgsBuf.Bytes(), &input); err != nil {
+			log.Errorf("invalid lua input JSON: %v", err)
+			return
+		}
+		termWidth, _, _ := util.GetTerminalSize()
+		numLineCount := countLinesDownNoNewLine(2 + len(consts.LuaToolName) + runewidth.StringWidth(ep.toolCallArgsBuf.String()))
+		ep.printer.PrintWithScratch(func(s *bytes.Buffer) {
+			clearLines(s, numLineCount)
+			s.WriteString(printer.ColorPurple)
+			s.WriteString("$ ")
+			s.WriteString(input.Name)
+			s.WriteString(printer.Reset)
+			s.WriteString("\n")
+			s.WriteString(util.MustRenderCodeBlock("lua", termWidth, input.Script))
+			s.WriteString("\n")
+		})
+
+	default:
+		ep.printer.Print(printer.Reset, "\n")
+	}
+}
+
+func clearLines(s *bytes.Buffer, count int) {
+	for range count {
+		s.WriteString(printer.ClearLine)
+		s.WriteString(printer.Up1Line)
+	}
+	s.WriteString(printer.ClearLine)
+	s.WriteString("\r")
+}
+
+func (ep *EventPrinter) startEvent(eventType outputType) {
 	switch eventType {
-	case OutputTypeUninitialized:
-	case OutputTypeText:
+	case outputTypeNone:
+	case outputTypeText:
 		if width, _, err := util.GetTerminalSize(); err != nil {
 			log.Errorf("failed to get terminal size: %v", err)
 		} else {
@@ -377,13 +345,13 @@ func (ep *EventPrinter) startEvent(eventType OutputType) {
 		}
 		ep.printer.Print(printer.BgWhite, " ", printer.Reset, " ")
 		ep.currentWidth = 2 + (ep.printer.GetIndent() * 2)
-	case OuputTypeThought:
+	case outputTypeThought:
 		ep.printer.Print(printer.BgBrightBlack, " ", printer.Reset, " ", printer.ColorBrightBlack)
-	case OutputTypeFnCall:
+	case outputTypeFnCall:
 		ep.printer.Print(printer.ColorBlue, "$ ")
-	case OutputTypeFnArgs:
+	case outputTypeFnArgs:
 		ep.printer.Print(printer.ColorCyan)
-	case OutputTypeErr:
+	case outputTypeErr:
 		ep.printer.Print(printer.BgRed, " ", printer.Reset, " ", printer.ColorRed)
 	default:
 		panic(fmt.Sprintf("unsupported event type: %d", eventType))
@@ -395,22 +363,18 @@ func (ep *EventPrinter) processOutput(event models.Output) {
 	case *models.OutputUnknown:
 	case *models.OutputText:
 		ep.textBuf.WriteString(e.Text)
-
-		// count the number of new lines in the text and update the current width accordingly
 		for _, char := range e.Text {
 			if char == '\n' {
 				ep.textNewLineCount++
-				ep.currentWidth = (ep.printer.GetIndent() * 2)
+				ep.currentWidth = ep.printer.GetIndent() * 2
 			} else {
-				chatWidth := runewidth.RuneWidth(char)
-				ep.currentWidth += chatWidth
+				ep.currentWidth += runewidth.RuneWidth(char)
 				if ep.terminalWidth > 0 && ep.currentWidth >= ep.terminalWidth {
 					ep.textNewLineCount++
 					ep.currentWidth = 0
 				}
 			}
 		}
-
 		ep.printer.Print(e.Text)
 	case *models.OutputReasoning:
 		ep.printer.Print(e.Reasoning)
@@ -418,11 +382,8 @@ func (ep *EventPrinter) processOutput(event models.Output) {
 		ep.toolCallName = e.Name
 		ep.printer.Print(printer.ColorGreen, e.Name)
 	case *models.OutputFnArgs:
-		switch ep.toolCallName {
-		case consts.BashToolName:
-			ep.bashToolCallJsonBuf.WriteString(e.Args)
-		case consts.LuaToolName:
-			ep.luaToolCallJsonBuf.WriteString(e.Args)
+		if ep.toolCallName == consts.BashToolName || ep.toolCallName == consts.LuaToolName {
+			ep.toolCallArgsBuf.WriteString(e.Args)
 		}
 		ep.printer.Print(e.Args)
 	case *models.OutputErr:
@@ -437,8 +398,7 @@ type LastOutputError struct {
 }
 
 func (le *LastOutputError) Set(event models.Event) {
-	switch e := event.(type) {
-	case *models.OutputErr:
+	if e, ok := event.(*models.OutputErr); ok {
 		le.Err = e
 	}
 }

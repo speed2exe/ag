@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -41,24 +40,13 @@ func LoadFromPaths(log func(s string), roots []string) map[string]*Skill {
 func PreloadFromPaths(log func(s string), roots []string) map[string]string {
 	skillByFilePath := make(map[string]string)
 	countByRoot := make(map[string]int, len(roots))
-	for _, p := range roots {
-		countByRoot[p] = 0
-	}
 
 	walkSkillFiles(log, roots, func(root, path string) {
-		// load entire file content as string for preload skills
-		f, err := os.Open(path)
-		if err != nil {
-			log(fmt.Sprintf("warning: opening skill file %q: %v\n", path, err))
-			return
-		}
-		defer f.Close()
-		contents, err := io.ReadAll(f)
+		contents, err := os.ReadFile(path)
 		if err != nil {
 			log(fmt.Sprintf("warning: reading skill file %q: %v\n", path, err))
 			return
 		}
-
 		skillByFilePath[path] = string(contents)
 		countByRoot[root]++
 	})
@@ -73,19 +61,17 @@ func PreloadFromPaths(log func(s string), roots []string) map[string]string {
 func walkSkillFiles(log func(s string), roots []string, load func(root, path string)) {
 	visitedPaths := make(map[string]struct{})
 	for _, root := range roots {
-		if err := filepath.WalkDir(root, func(leaf string, _ fs.DirEntry, err error) error {
+		if err := filepath.WalkDir(root, func(leaf string, d fs.DirEntry, err error) error {
 			if err != nil {
 				log(fmt.Sprintf("warning: walking skill path %q: %v\n", leaf, err))
 				return nil
 			}
-
-			// Skip if we've already visited this path (handles duplicates and cycles).
 			if _, visited := visitedPaths[leaf]; visited {
 				return nil
 			}
 			visitedPaths[leaf] = struct{}{}
 
-			if !strings.HasSuffix(leaf, "/SKILL.md") {
+			if d.IsDir() || d.Name() != "SKILL.md" {
 				return nil
 			}
 			load(root, leaf)

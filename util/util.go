@@ -2,10 +2,12 @@
 package util
 
 import (
+	"cmp"
 	"encoding/base64"
 	"fmt"
+	"maps"
 	"os"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -611,12 +613,9 @@ func getEnvAsInt(key string, defaultValue int) (int, error) {
 }
 
 func ToolSortedListFromMap(toolsByName map[string]*tool.Tool) []*tool.Tool {
-	tools := make([]*tool.Tool, 0, len(toolsByName))
-	for _, t := range toolsByName {
-		tools = append(tools, t)
-	}
-	sort.Slice(tools, func(i, j int) bool {
-		return tools[i].Name < tools[j].Name
+	tools := slices.Collect(maps.Values(toolsByName))
+	slices.SortFunc(tools, func(a, b *tool.Tool) int {
+		return cmp.Compare(a.Name, b.Name)
 	})
 	return tools
 }

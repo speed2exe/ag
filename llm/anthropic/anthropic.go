@@ -19,7 +19,7 @@ type Client struct {
 }
 
 func New(log func(string), setting *setting.Settings) (*Client, error) {
-	opts := []option.RequestOption{}
+	var opts []option.RequestOption
 	if setting.AnthropicBaseUrl != "" {
 		opts = append(opts, option.WithBaseURL(setting.AnthropicBaseUrl))
 	}
@@ -35,7 +35,7 @@ func (c *Client) GenerateStream(
 	tools []*tool.Tool,
 	msgs []models.Message,
 ) <-chan models.Event {
-	anMessages := toAnthropicMessages(ctx, msgs)
+	anMessages := toAnthropicMessages(msgs)
 	anTools, err := toAnthropicTools(tools)
 	if err != nil {
 		panic(fmt.Errorf("failed to convert tools for Anthropic: %w", err))
@@ -96,10 +96,9 @@ func (c *Client) GenerateStream(
 	return events
 }
 
-func toAnthropicMessages(ctx context.Context, msgs []models.Message) []anthropic.MessageParam {
+func toAnthropicMessages(msgs []models.Message) []anthropic.MessageParam {
 	res := make([]anthropic.MessageParam, 0, len(msgs))
 	for _, msg := range msgs {
-
 		switch m := msg.(type) {
 		case *models.ContextId:
 			panic("context id message type is not supported by Anthropic API")
@@ -107,6 +106,7 @@ func toAnthropicMessages(ctx context.Context, msgs []models.Message) []anthropic
 			res = append(res, textMessage(anthropic.MessageParamRoleUser, m.Text))
 		case *models.UserPrompt:
 			res = append(res, textMessage(anthropic.MessageParamRoleUser, m.Text))
+		case *models.AgentReasoning:
 		case *models.AgentResponse:
 			res = append(res, textMessage(anthropic.MessageParamRoleAssistant, m.Text))
 		case *models.OutputErr:
@@ -118,9 +118,7 @@ func toAnthropicMessages(ctx context.Context, msgs []models.Message) []anthropic
 		default:
 			panic(fmt.Sprintf("unsupported message type: %T", msg))
 		}
-
 	}
-
 	return res
 }
 
@@ -178,9 +176,9 @@ func toAnthropicTools(tools []*tool.Tool) ([]anthropic.ToolUnionParam, error) {
 }
 
 func toSystemPrompt(instructions []string) []anthropic.TextBlockParam {
-	blocks := make([]anthropic.TextBlockParam, 0, len(instructions))
-	for _, instruction := range instructions {
-		blocks = append(blocks, anthropic.TextBlockParam{Text: instruction})
+	blocks := make([]anthropic.TextBlockParam, len(instructions))
+	for i, instruction := range instructions {
+		blocks[i] = anthropic.TextBlockParam{Text: instruction}
 	}
 	return blocks
 }
@@ -190,26 +188,4 @@ func optString(s *string) param.Opt[string] {
 		return param.Null[string]()
 	}
 	return param.NewOpt(*s)
-}
-
-func toolCallResultErrorText(tc *models.ToolCall, err error) anthropic.ContentBlockParamUnion {
-	return anthropic.ContentBlockParamUnion{
-		OfToolResult: &anthropic.ToolResultBlockParam{
-			ToolUseID: tc.CallId,
-			Content: []anthropic.ToolResultBlockParamContentUnion{
-				{OfText: &anthropic.TextBlockParam{Text: fmt.Sprintf("Error calling tool %s: %v", tc.Name, err)}},
-			},
-		},
-	}
-}
-
-func toolCallResultText(tc *models.ToolCall) anthropic.ContentBlockParamUnion {
-	return anthropic.ContentBlockParamUnion{
-		OfToolResult: &anthropic.ToolResultBlockParam{
-			ToolUseID: tc.CallId,
-			Content: []anthropic.ToolResultBlockParamContentUnion{
-				{OfText: &anthropic.TextBlockParam{Text: tc.Result}},
-			},
-		},
-	}
 }

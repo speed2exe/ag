@@ -2,9 +2,9 @@ package anthropic
 
 import (
 	"context"
+	"encoding/json/v2"
 	"fmt"
 
-	"encoding/json/v2"
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/packages/param"
 	"github.com/speed2exe/ag/consts"
@@ -13,8 +13,7 @@ import (
 
 // CallTool implements [llm.ToolCaller].
 func (c *Client) CallTool(ctx context.Context, toolName string, args string) (string, bool, error) {
-	_, isAnTool := anToolsByName[toolName]
-	if !isAnTool {
+	if _, ok := anToolsByName[toolName]; !ok {
 		return "", false, nil
 	}
 	return consts.LlmInternalToolHandling, true, nil
@@ -24,7 +23,6 @@ var (
 	anTools = []anTool{
 		loadImagesByUrl().compile(),
 		loadImagesByFile().compile(),
-		// ...
 	}
 	anToolsByName = func() map[string]anTool {
 		m := make(map[string]anTool, len(anTools))
@@ -43,7 +41,6 @@ var (
 					InputSchema: tool.schema,
 				},
 			}
-			anToolsByName[tool.name] = tool
 		}
 		return tools
 	}()
@@ -81,18 +78,6 @@ func (a anToolTyped[Input]) compile() anTool {
 	}
 }
 
-func callAnTool(ctx context.Context, callId, name, args string) (anthropic.ContentBlockParamUnion, bool, error) {
-	anTool, ok := anToolsByName[name]
-	if !ok {
-		return anthropic.ContentBlockParamUnion{}, false, nil
-	}
-	res, err := anTool.call(ctx, callId, args)
-	if err != nil {
-		return anthropic.ContentBlockParamUnion{}, false, fmt.Errorf("failed to call tool %s: %w", name, err)
-	}
-	return res, true, nil
-}
-
 func toolInputSchemaFor[Input any]() (anthropic.ToolInputSchemaParam, error) {
 	bs, err := util.SchemaForInput[Input]()
 	if err != nil {
@@ -100,7 +85,7 @@ func toolInputSchemaFor[Input any]() (anthropic.ToolInputSchemaParam, error) {
 	}
 
 	var inputSchema anthropic.ToolInputSchemaParam
-	if err := inputSchema.UnmarshalJSON([]byte(bs)); err != nil {
+	if err := inputSchema.UnmarshalJSON(bs); err != nil {
 		return anthropic.ToolInputSchemaParam{}, fmt.Errorf("failed to unmarshal tool input schema: %w", err)
 	}
 	inputSchema.Type = "" // elided
@@ -150,7 +135,7 @@ type loadImagesByFileInputItem struct {
 func loadImagesByFile() anToolTyped[loadImagesByFileInput] {
 	return anToolTyped[loadImagesByFileInput]{
 		name:        "load_images_by_file",
-		description: "Load images from URL. Supported media_type: [\"image/jpeg\", \"image/png\", \"image/gif\", \"image/webp\"]",
+		description: "Load images from file. Supported media_type: [\"image/jpeg\", \"image/png\", \"image/gif\", \"image/webp\"]",
 		call: func(ctx context.Context, callId string, input loadImagesByFileInput) (anthropic.ContentBlockParamUnion, error) {
 			blocks := make([]anthropic.ToolResultBlockParamContentUnion, len(input.Items))
 			for i, item := range input.Items {

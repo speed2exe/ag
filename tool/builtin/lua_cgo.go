@@ -231,7 +231,7 @@ func Lua() *tool.Tool {
 
 	return (&util.ToolForJsonInputOutput[models.LuaInput, models.LuaOutput]{
 		Name:        consts.LuaToolName,
-		Description: new(`Executes Lua scripts and returns stdout, stderr, and the script's return value; multiple returned values are returned as an array.`),
+		Description: new(luaToolDescription),
 		Call:        call,
 	}).MustCompile()
 }
@@ -250,9 +250,9 @@ func captureLuaResult(state *C.lua_State, handle uintptr, resultCount int) C.int
 		return 0
 	}
 
-	values := make([]any, int(resultCount))
+	values := make([]any, resultCount)
 	for index := range values {
-		result, err := readLuaJSONValue(state, C.int(index-int(resultCount)), make(map[unsafe.Pointer]bool), 0)
+		result, err := readLuaJSONValue(state, C.int(index-resultCount), make(map[unsafe.Pointer]bool), 0)
 		if err != nil {
 			pushLuaError(state, fmt.Sprintf("failed to capture Lua result: %v", err))
 			return -1
@@ -308,12 +308,10 @@ func readLuaJSONValue(
 
 		object := make(map[string]any)
 		array := make(map[int]any)
-		hasStringKeys, hasIntegerKeys := false, false
 		C.lua_pushnil(state)
 		for C.lua_next(state, absoluteIndex) != 0 {
 			switch C.lua_type(state, -2) {
 			case C.LUA_TSTRING:
-				hasStringKeys = true
 				var length C.size_t
 				key := C.lua_tolstring(state, -2, &length)
 				value, err := readLuaJSONValue(state, -1, seen, depth+1)
@@ -323,40 +321,24 @@ func readLuaJSONValue(
 				}
 				object[C.GoStringN(key, C.int(length))] = value
 			case C.LUA_TNUMBER:
-				number := float64(C.ag_lua_tonumber(state, -2))
-				if math.IsNaN(number) || math.IsInf(number, 0) || math.Trunc(number) != number ||
-					number < 1 || number >= float64(int(^uint(0)>>1)) {
+				idx, ok := luaTableIndex(float64(C.ag_lua_tonumber(state, -2)))
+				if !ok {
 					C.ag_lua_pop(state, 2)
 					return nil, fmt.Errorf("Lua tool argument table keys must be strings or positive integer indices")
 				}
-				hasIntegerKeys = true
 				value, err := readLuaJSONValue(state, -1, seen, depth+1)
 				if err != nil {
 					C.ag_lua_pop(state, 2)
 					return nil, err
 				}
-				array[int(number)] = value
+				array[idx] = value
 			default:
 				C.ag_lua_pop(state, 2)
 				return nil, fmt.Errorf("Lua tool argument table keys must be strings or positive integer indices")
 			}
 			C.ag_lua_pop(state, 1)
 		}
-		if hasStringKeys && hasIntegerKeys {
-			return nil, fmt.Errorf("Lua tool argument tables cannot mix object and array keys")
-		}
-		if !hasIntegerKeys {
-			return object, nil
-		}
-		values := make([]any, len(array))
-		for i := range values {
-			value, ok := array[i+1]
-			if !ok {
-				return nil, fmt.Errorf("Lua tool argument arrays must use contiguous integer keys starting at 1")
-			}
-			values[i] = value
-		}
-		return values, nil
+		return finalizeLuaTable(object, array)
 	default:
 		return nil, fmt.Errorf("Lua tool arguments cannot contain %s values", C.GoString(C.lua_typename(state, C.lua_type(state, index))))
 	}

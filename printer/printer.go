@@ -27,11 +27,13 @@ type Printer struct {
 func New(ctx context.Context, w io.Writer) *Printer {
 	p := &Printer{output: bufio.NewWriter(w)}
 	go func() {
+		ticker := time.NewTicker(177 * time.Millisecond)
+		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(177 * time.Millisecond):
+			case <-ticker.C:
 				p.Flush()
 			}
 		}
@@ -51,6 +53,7 @@ func (p *Printer) writeIndented(data []byte) (int, error) {
 	if p.indent == 0 {
 		return p.output.Write(data)
 	}
+	indent := bytes.Repeat([]byte("  "), p.indent)
 	total := 0
 	for len(data) > 0 {
 		idx := bytes.IndexAny(data, "\r\n")
@@ -63,7 +66,7 @@ func (p *Printer) writeIndented(data []byte) (int, error) {
 		if err != nil {
 			return total, err
 		}
-		p.output.Write(bytes.Repeat([]byte("  "), p.indent))
+		p.output.Write(indent)
 		data = data[idx+1:]
 	}
 	return total, nil

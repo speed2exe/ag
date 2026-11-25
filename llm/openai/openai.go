@@ -2,19 +2,17 @@ package openai
 
 import (
 	"context"
+	"encoding/json/v2"
 	"fmt"
 	"strings"
-
-	"github.com/speed2exe/ag/models"
-	"github.com/speed2exe/ag/setting"
-	"github.com/speed2exe/ag/tool"
-
-	"encoding/json/v2"
 
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
 	"github.com/openai/openai-go/packages/param"
 	"github.com/openai/openai-go/responses"
+	"github.com/speed2exe/ag/models"
+	"github.com/speed2exe/ag/setting"
+	"github.com/speed2exe/ag/tool"
 )
 
 type Client struct {
@@ -23,7 +21,7 @@ type Client struct {
 }
 
 func New(log func(string), s *setting.Settings) (*Client, error) {
-	opts := []option.RequestOption{}
+	var opts []option.RequestOption
 	if s.OpenAIApiKey != "" {
 		opts = append(opts, option.WithAPIKey(s.OpenAIApiKey))
 	}
@@ -42,17 +40,13 @@ func (c *Client) GenerateStream(
 	tools []*tool.Tool,
 	messages []models.Message,
 ) <-chan models.Event {
-	// TODO: add reasoning
-	input := toResponsesInput(ctx, messages)
-	openAiTools := toResponsesTools(tools)
-
 	params := responses.ResponseNewParams{
 		Model:        openai.ResponsesModel(c.model),
 		Instructions: param.NewOpt(strings.Join(instructions, "\n\n")),
 		Input: responses.ResponseNewParamsInputUnion{
-			OfInputItemList: input,
+			OfInputItemList: toResponsesInput(messages),
 		},
-		Tools: openAiTools,
+		Tools: toResponsesTools(tools),
 	}
 
 	stream := c.client.Responses.NewStreaming(ctx, params)
@@ -106,7 +100,7 @@ func easyMsgString(role responses.EasyInputMessageRole, text string) responses.R
 	}
 }
 
-func toResponsesInput(ctx context.Context, messages []models.Message) responses.ResponseInputParam {
+func toResponsesInput(messages []models.Message) responses.ResponseInputParam {
 	var input responses.ResponseInputParam
 	// The Responses API rejects the whole request when a call_id shows up more
 	// than once, so only the first occurrence of a tool call is sent.
@@ -130,31 +124,6 @@ func toResponsesInput(ctx context.Context, messages []models.Message) responses.
 		case *models.OutputErr:
 			input = append(input, easyMsgString(responses.EasyInputMessageRoleAssistant, m.Err))
 		case *models.ToolCalls:
-
-			// handle llm specific tool calls
-			{
-				i := 0
-				for i < len(m.Items) {
-					tc := m.Items[i]
-					if fn, exists := oaiToolsByName[tc.Name]; exists {
-						// process
-						result, err := fn.call(ctx, tc.Args)
-						if err != nil { // if error, set result to error message and continue
-							m.Items[i].Result = fmt.Sprintf("error calling tool %s: %v", tc.Name, err)
-							i++
-							continue
-						}
-						input = append(input, result)
-
-						// remove from list
-						m.Items[i] = m.Items[len(m.Items)-1]
-						m.Items = m.Items[:len(m.Items)-1]
-					} else {
-						i++
-					}
-				}
-			}
-
 			callItems := make([]*models.ToolCall, 0, len(m.Items))
 			for _, tc := range m.Items {
 				if tc.CallId != "" {
@@ -166,25 +135,21 @@ func toResponsesInput(ctx context.Context, messages []models.Message) responses.
 				callItems = append(callItems, tc)
 			}
 			for _, tc := range callItems {
-				input = append(input,
-					responses.ResponseInputItemUnionParam{
-						OfFunctionCall: &responses.ResponseFunctionToolCallParam{
-							CallID:    tc.CallId,
-							Name:      tc.Name,
-							Arguments: tc.Args,
-						},
+				input = append(input, responses.ResponseInputItemUnionParam{
+					OfFunctionCall: &responses.ResponseFunctionToolCallParam{
+						CallID:    tc.CallId,
+						Name:      tc.Name,
+						Arguments: tc.Args,
 					},
-				)
+				})
 			}
 			for _, tc := range callItems {
-				input = append(input,
-					responses.ResponseInputItemUnionParam{
-						OfFunctionCallOutput: &responses.ResponseInputItemFunctionCallOutputParam{
-							CallID: tc.CallId,
-							Output: tc.Result,
-						},
+				input = append(input, responses.ResponseInputItemUnionParam{
+					OfFunctionCallOutput: &responses.ResponseInputItemFunctionCallOutputParam{
+						CallID: tc.CallId,
+						Output: tc.Result,
 					},
-				)
+				})
 			}
 		default:
 			panic(fmt.Sprintf("unsupported message type: %T", msg))
@@ -194,10 +159,7 @@ func toResponsesInput(ctx context.Context, messages []models.Message) responses.
 }
 
 func toResponsesTools(tools []*tool.Tool) []responses.ToolUnionParam {
-	openAiTools := make([]responses.ToolUnionParam, 0, len(tools)+len(oaiApiTools))
-	for _, t := range oaiApiTools {
-		openAiTools = append(openAiTools, t)
-	}
+	openAiTools := make([]responses.ToolUnionParam, 0, len(tools))
 	for _, t := range tools {
 		var params map[string]any
 		if err := json.Unmarshal(t.InputSchema, &params); err != nil {
@@ -216,10 +178,4 @@ func toResponsesTools(tools []*tool.Tool) []responses.ToolUnionParam {
 		openAiTools = append(openAiTools, fn)
 	}
 	return openAiTools
-}
-
-type ToolCall struct {
-	CallId string
-	Name   string
-	Args   *strings.Builder
 }
