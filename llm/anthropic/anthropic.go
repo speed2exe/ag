@@ -18,15 +18,15 @@ type Client struct {
 	model string
 }
 
-func New(log func(string), setting *setting.Settings) (*Client, error) {
+func New(s *setting.Settings) *Client {
 	var opts []option.RequestOption
-	if setting.AnthropicBaseUrl != "" {
-		opts = append(opts, option.WithBaseURL(setting.AnthropicBaseUrl))
+	if s.AnthropicBaseUrl != "" {
+		opts = append(opts, option.WithBaseURL(s.AnthropicBaseUrl))
 	}
 	return &Client{
 		an:    anthropic.NewClient(opts...),
-		model: setting.AnthropicModel,
-	}, nil
+		model: s.AnthropicModel,
+	}
 }
 
 func (c *Client) GenerateStream(
@@ -35,18 +35,11 @@ func (c *Client) GenerateStream(
 	tools []*tool.Tool,
 	msgs []models.Message,
 ) <-chan models.Event {
-	anMessages := toAnthropicMessages(msgs)
-	anTools, err := toAnthropicTools(tools)
-	if err != nil {
-		panic(fmt.Errorf("failed to convert tools for Anthropic: %w", err))
-	}
-	systemPrompt := toSystemPrompt(instructions)
-
 	stream := c.an.Messages.NewStreaming(ctx, anthropic.MessageNewParams{
-		System:   systemPrompt,
-		Messages: anMessages,
+		System:   toSystemPrompt(instructions),
+		Messages: toAnthropicMessages(msgs),
 		Model:    c.model,
-		Tools:    anTools,
+		Tools:    toAnthropicTools(tools),
 
 		MaxTokens: int64(128 * 1024), // 128k tokens, based on https://platform.claude.com/docs/en/models/overview
 		Thinking: anthropic.ThinkingConfigParamUnion{
@@ -57,7 +50,6 @@ func (c *Client) GenerateStream(
 	})
 
 	events := make(chan models.Event, 64)
-
 	go func() {
 		defer close(events)
 
@@ -156,23 +148,26 @@ func textMessage(role anthropic.MessageParamRole, text string) anthropic.Message
 	}
 }
 
-func toAnthropicTools(tools []*tool.Tool) ([]anthropic.ToolUnionParam, error) {
+func toAnthropicTools(tools []*tool.Tool) []anthropic.ToolUnionParam {
 	toolParams := make([]anthropic.ToolUnionParam, len(tools))
-	for i, tool := range tools {
+	for i, t := range tools {
 		var inputSchema anthropic.ToolInputSchemaParam
-		if err := inputSchema.UnmarshalJSON(tool.InputSchema); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal tool input schema for tool %s: %w", tool.Name, err)
+		if err := inputSchema.UnmarshalJSON(t.InputSchema); err != nil {
+			panic(fmt.Errorf("failed to unmarshal tool input schema for tool %s: %w", t.Name, err))
 		}
-
+		desc := param.Null[string]()
+		if t.Description != nil {
+			desc = param.NewOpt(*t.Description)
+		}
 		toolParams[i] = anthropic.ToolUnionParam{
 			OfTool: &anthropic.ToolParam{
 				InputSchema: inputSchema,
-				Name:        tool.Name,
-				Description: optString(tool.Description),
+				Name:        t.Name,
+				Description: desc,
 			},
 		}
 	}
-	return append(toolParams, anApiTools...), nil
+	return toolParams
 }
 
 func toSystemPrompt(instructions []string) []anthropic.TextBlockParam {
@@ -181,11 +176,4 @@ func toSystemPrompt(instructions []string) []anthropic.TextBlockParam {
 		blocks[i] = anthropic.TextBlockParam{Text: instruction}
 	}
 	return blocks
-}
-
-func optString(s *string) param.Opt[string] {
-	if s == nil {
-		return param.Null[string]()
-	}
-	return param.NewOpt(*s)
 }

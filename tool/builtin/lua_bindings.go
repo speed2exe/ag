@@ -1,20 +1,39 @@
 package builtin
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"strings"
 
+	"github.com/speed2exe/ag/consts"
 	"github.com/speed2exe/ag/models"
+	"github.com/speed2exe/ag/tool"
+	"github.com/speed2exe/ag/util"
 )
 
-const luaToolDescription = `Executes Lua scripts and returns stdout, stderr, and the script's return value; multiple returned values are returned as an array.`
+func Lua() *tool.Tool {
+	return util.NewJSONTool(
+		consts.LuaToolName,
+		`Executes Lua scripts and returns stdout, stderr, and the script's return value; multiple returned values are returned as an array.`,
+		func(_ context.Context, input *models.LuaInput) (*models.LuaOutput, error) {
+			if strings.IndexByte(input.Name, 0) >= 0 {
+				return nil, fmt.Errorf("Lua script name contains a NUL byte")
+			}
+			return executeLua(input)
+		},
+	)
+}
 
-func validateLuaInput(input *models.LuaInput) error {
-	if strings.IndexByte(input.Name, 0) >= 0 {
-		return fmt.Errorf("Lua script name contains a NUL byte")
+func unwrapLuaResults(values []any) any {
+	switch len(values) {
+	case 0:
+		return nil
+	case 1:
+		return values[0]
+	default:
+		return values
 	}
-	return nil
 }
 
 func luaTableIndex(number float64) (int, bool) {

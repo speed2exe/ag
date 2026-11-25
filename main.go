@@ -47,13 +47,15 @@ func mainErr(ctx context.Context, p *printer.Printer) error {
 		return fmt.Errorf("failed to parse arguments: %w. \nUse -h/--help for usage", err)
 	}
 
-	go removeOldContexts(settings.ContextDir, settings.ContextTtl)
-
-	if err := log.Init(logFilePath(settings)); err != nil {
-		return fmt.Errorf("failed to initialize log: %w", err)
+	if settings.LoggingEnabled {
+		if err := log.Init(settings.LogFilePath); err != nil {
+			return fmt.Errorf("failed to initialize log: %w", err)
+		}
 	}
 
-	model, err := llm.New(p.Log, settings)
+	go removeOldContexts(settings.ContextDir, settings.ContextTtl)
+
+	model, err := llm.New(settings)
 	if err != nil {
 		return fmt.Errorf("failed to initialize LLM client: %w", err)
 	}
@@ -72,11 +74,13 @@ func mainErr(ctx context.Context, p *printer.Printer) error {
 		CtxStore:    store.NewCtxStore(settings.ContextDir),
 	})
 
+	tools := util.ToolSortedListFromMap(toolsByName)
 	instructions := buildInstructions(p, settings, skills, a2aClients)
+	eventPrinter := llm.NewEventPrinter(p)
 	if setting.StdinIsTerm {
-		runInteractive(ctx, p, llm.NewEventPrinter(p), settings, model, toolsByName, instructions)
+		runInteractive(ctx, p, eventPrinter, settings, model, tools, instructions)
 	} else {
-		processPrompt(ctx, p, llm.NewEventPrinter(p), model, toolsByName, instructions, settings.ContextId, settings.UserInput.String())
+		processPrompt(ctx, p, eventPrinter, model, tools, instructions, settings.ContextId, settings.UserInput)
 	}
 	return nil
 }
@@ -91,22 +95,20 @@ func buildTools(ctx context.Context, p *printer.Printer, s *setting.Settings, a2
 	addTools := func(tools []*tool.Tool) {
 		for _, t := range tools {
 			if _, exists := res[t.Name]; exists {
-				p.Print(printer.ColorYellow, fmt.Sprintf("warning: tool %s already exists, skipping\n", t.Name), printer.Reset)
+				p.Log(fmt.Sprintf("warning: tool %s already exists, skipping\n", t.Name))
 				continue
 			}
 			res[t.Name] = t
 		}
 	}
-	for _, tools := range mcp.NewMcpFromConfig(ctx, p.Log, s.McpConfPaths) {
-		addTools(tools)
-	}
+	addTools(mcp.LoadTools(ctx, p.Log, s.McpConfPaths))
 	addTools(a2aClients.Tools())
 	return res
 }
 
 func runInteractive(
 	ctx context.Context, p *printer.Printer, eventPrinter *llm.EventPrinter, settings *setting.Settings,
-	model llm.Model, toolsByName map[string]*tool.Tool, instructions []string,
+	model llm.Model, tools []*tool.Tool, instructions []string,
 ) {
 	ctxId := settings.ContextId
 
@@ -124,11 +126,6 @@ func runInteractive(
 			ctxIdBySessionKey[settings.SessionKey] = ctxId
 			saveJSONFile(settings.SessionPath, "session key", ctxIdBySessionKey)
 		}()
-	}
-
-	// If stdin was piped (e.g. `echo hi | agent -i`), process it as the first turn.
-	if pendingPrompt := strings.TrimSpace(settings.UserInput.String()); pendingPrompt != "" {
-		ctxId = processPrompt(ctx, p, eventPrinter, model, toolsByName, instructions, ctxId, pendingPrompt)
 	}
 
 	// Load history prompts.
@@ -154,7 +151,7 @@ func runInteractive(
 		historyPrompts = append(historyPrompts, userPrompt)
 		readline.AddHistory(userPrompt)
 
-		ctxId = processPrompt(ctx, p, eventPrinter, model, toolsByName, instructions, ctxId, userPrompt)
+		ctxId = processPrompt(ctx, p, eventPrinter, model, tools, instructions, ctxId, userPrompt)
 	}
 }
 
@@ -187,7 +184,7 @@ func processPrompt(
 	p *printer.Printer,
 	eventPrinter *llm.EventPrinter,
 	model llm.Model,
-	toolsByName map[string]*tool.Tool,
+	tools []*tool.Tool,
 	instructions []string,
 	contextId string,
 	userPrompt string,
@@ -196,7 +193,7 @@ func processPrompt(
 	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt)
 	defer cancel()
 
-	nextCtxId, eventStream := core.GenerateStream(ctx, model, util.ToolSortedListFromMap(toolsByName), instructions, contextId, userPrompt)
+	nextCtxId, eventStream := core.GenerateStream(ctx, model, tools, instructions, contextId, userPrompt)
 	util.StreamActions(eventStream, eventPrinter.Print)
 	eventPrinter.FinishCurrentOutput()
 	p.Print(printer.ColorPurple, fmt.Sprintf("--context-id %s\n", nextCtxId), printer.Reset)
@@ -233,10 +230,7 @@ func buildInstructions(p *printer.Printer, settings *setting.Settings, skills *s
 	if s := agentsmd.Load(p.Log, "."); s != "" {
 		instructions = append(instructions, s)
 	}
-	instructions = append(instructions, skill.BuildPreloadSkillInstructions(skills.PreloadSkillByFilePath)...)
-	if s := skill.BuildSkillInstructions(skills.SkillByFilePath); s != "" {
-		instructions = append(instructions, s)
-	}
+	instructions = append(instructions, skills.BuildInstructions()...)
 	if s := a2aClients.BuildInstructions(); s != "" {
 		instructions = append(instructions, s)
 	}
@@ -249,15 +243,8 @@ func loadInstructionFile(p *printer.Printer, path string) string {
 		log.Warnf("load instructions from %s error: %s", path, err.Error())
 		return ""
 	}
-	p.Print(printer.ColorYellow, fmt.Sprintf("loaded %s\n", path), printer.Reset)
+	p.Log(fmt.Sprintf("loaded %s\n", path))
 	return strings.TrimSpace(string(data))
-}
-
-func logFilePath(s *setting.Settings) *string {
-	if s.LoggingEnabled {
-		return &s.LogFilePath
-	}
-	return nil
 }
 
 func removeOldContexts(contextDir string, contextTtl time.Duration) {

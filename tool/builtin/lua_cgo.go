@@ -176,72 +176,52 @@ cleanup:
 import "C"
 
 import (
-	"context"
 	"fmt"
 	"math"
 	"runtime/cgo"
 	"unsafe"
 
-	"github.com/speed2exe/ag/consts"
 	"github.com/speed2exe/ag/models"
-	"github.com/speed2exe/ag/tool"
-	"github.com/speed2exe/ag/util"
 )
 
-func Lua() *tool.Tool {
-	call := func(_ context.Context, input *models.LuaInput) (*models.LuaOutput, error) {
-		if err := validateLuaInput(input); err != nil {
-			return nil, err
+func executeLua(input *models.LuaInput) (*models.LuaOutput, error) {
+	var result any
+	handle := cgo.NewHandle(&result)
+	defer handle.Delete()
+
+	name := C.CString(input.Name)
+	defer C.free(unsafe.Pointer(name))
+	script := C.CBytes([]byte(input.Script))
+	defer C.free(script)
+
+	var stdout, stderr, message *C.char
+	var stdoutSize, stderrSize C.size_t
+	if C.ag_lua_execute(name,
+		(*C.char)(script), C.size_t(len(input.Script)),
+		C.uintptr_t(handle),
+		&stdout, &stdoutSize,
+		&stderr, &stderrSize,
+		&message,
+	) != 0 {
+		defer C.free(unsafe.Pointer(message))
+		messageText := "unknown Lua error"
+		if message != nil {
+			messageText = C.GoString(message)
 		}
-
-		execution := &luaExecution{}
-		handle := cgo.NewHandle(execution)
-		defer handle.Delete()
-
-		name := C.CString(input.Name)
-		defer C.free(unsafe.Pointer(name))
-		script := C.CBytes([]byte(input.Script))
-		defer C.free(script)
-
-		var stdout, stderr, message *C.char
-		var stdoutSize, stderrSize C.size_t
-		if C.ag_lua_execute(name,
-			(*C.char)(script), C.size_t(len(input.Script)),
-			C.uintptr_t(handle),
-			&stdout, &stdoutSize,
-			&stderr, &stderrSize,
-			&message,
-		) != 0 {
-			defer C.free(unsafe.Pointer(message))
-			messageText := "unknown Lua error"
-			if message != nil {
-				messageText = C.GoString(message)
-			}
-			return nil, fmt.Errorf("failed to execute Lua script: %s", messageText)
-		}
-		defer C.free(unsafe.Pointer(stdout))
-		defer C.free(unsafe.Pointer(stderr))
-
-		return &models.LuaOutput{
-			Stdout: C.GoStringN(stdout, C.int(stdoutSize)),
-			Stderr: C.GoStringN(stderr, C.int(stderrSize)),
-			Result: execution.result,
-		}, nil
+		return nil, fmt.Errorf("failed to execute Lua script: %s", messageText)
 	}
+	defer C.free(unsafe.Pointer(stdout))
+	defer C.free(unsafe.Pointer(stderr))
 
-	return (&util.ToolForJsonInputOutput[models.LuaInput, models.LuaOutput]{
-		Name:        consts.LuaToolName,
-		Description: new(luaToolDescription),
-		Call:        call,
-	}).MustCompile()
-}
-
-type luaExecution struct {
-	result any
+	return &models.LuaOutput{
+		Stdout: C.GoStringN(stdout, C.int(stdoutSize)),
+		Stderr: C.GoStringN(stderr, C.int(stderrSize)),
+		Result: result,
+	}, nil
 }
 
 func captureLuaResult(state *C.lua_State, handle uintptr, resultCount int) C.int {
-	execution, ok := cgo.Handle(handle).Value().(*luaExecution)
+	resultPtr, ok := cgo.Handle(handle).Value().(*any)
 	if !ok {
 		pushLuaError(state, "invalid Lua result callback")
 		return -1
@@ -252,18 +232,14 @@ func captureLuaResult(state *C.lua_State, handle uintptr, resultCount int) C.int
 
 	values := make([]any, resultCount)
 	for index := range values {
-		result, err := readLuaJSONValue(state, C.int(index-resultCount), make(map[unsafe.Pointer]bool), 0)
+		val, err := readLuaJSONValue(state, C.int(index-resultCount), make(map[unsafe.Pointer]bool), 0)
 		if err != nil {
 			pushLuaError(state, fmt.Sprintf("failed to capture Lua result: %v", err))
 			return -1
 		}
-		values[index] = result
+		values[index] = val
 	}
-	if len(values) == 1 {
-		execution.result = values[0]
-	} else {
-		execution.result = values
-	}
+	*resultPtr = unwrapLuaResults(values)
 	return 0
 }
 

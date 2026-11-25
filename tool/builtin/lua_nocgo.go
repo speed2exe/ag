@@ -4,73 +4,46 @@ package builtin
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"math"
 
 	"github.com/mmcdole/lunar"
-	"github.com/speed2exe/ag/consts"
 	"github.com/speed2exe/ag/models"
-	"github.com/speed2exe/ag/tool"
-	"github.com/speed2exe/ag/util"
 )
 
-func Lua() *tool.Tool {
-	call := func(_ context.Context, input *models.LuaInput) (*models.LuaOutput, error) {
-		if err := validateLuaInput(input); err != nil {
-			return nil, err
-		}
+func executeLua(input *models.LuaInput) (*models.LuaOutput, error) {
+	var stdoutBuf, stderrBuf bytes.Buffer
+	s, err := lua.New(lua.Options{
+		Libraries: lua.FullLibraries(),
+		Stdout:    &stdoutBuf,
+		Stderr:    &stderrBuf,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Lua state: %w", err)
+	}
+	defer s.Close()
 
-		var stdoutBuf, stderrBuf bytes.Buffer
-		s, err := lua.New(lua.Options{
-			Libraries: lua.FullLibraries(),
-			Stdout:    &stdoutBuf,
-			Stderr:    &stderrBuf,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to create Lua state: %w", err)
-		}
-		defer s.Close()
-
-		results, err := s.DoString(input.Name, input.Script)
-		if err != nil {
-			return nil, fmt.Errorf("failed to execute Lua script: %w", err)
-		}
-
-		var result any
-		if len(results) > 0 {
-			values := make([]any, len(results))
-			for i, value := range results {
-				values[i], err = luaValueToJSON(value, nil, 0)
-				if err != nil {
-					return nil, fmt.Errorf("failed to capture Lua result: %w", err)
-				}
-			}
-			if len(values) == 1 {
-				result = values[0]
-			} else {
-				result = values
-			}
-		}
-
-		return &models.LuaOutput{
-			Stdout: stdoutBuf.String(),
-			Stderr: stderrBuf.String(),
-			Result: result,
-		}, nil
+	results, err := s.DoString(input.Name, input.Script)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute Lua script: %w", err)
 	}
 
-	return (&util.ToolForJsonInputOutput[models.LuaInput, models.LuaOutput]{
-		Name:        consts.LuaToolName,
-		Description: new(luaToolDescription),
-		Call:        call,
-	}).MustCompile()
+	values := make([]any, len(results))
+	for i, value := range results {
+		values[i], err = luaValueToJSON(value, nil, 0)
+		if err != nil {
+			return nil, fmt.Errorf("failed to capture Lua result: %w", err)
+		}
+	}
+
+	return &models.LuaOutput{
+		Stdout: stdoutBuf.String(),
+		Stderr: stderrBuf.String(),
+		Result: unwrapLuaResults(values),
+	}, nil
 }
 
 func luaTableToJSON(table *lua.Table, ancestors []lua.Value, depth int) (any, error) {
-	if depth > 64 {
-		return nil, fmt.Errorf("Lua tool arguments exceed maximum nesting depth")
-	}
 	tableValue := table.Value()
 	for _, ancestor := range ancestors {
 		if same, applicable := tableValue.SameObject(ancestor); applicable && same {

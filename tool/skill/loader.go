@@ -12,74 +12,48 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// LoadFromPaths discovers and loads Agent Skills from a list of paths.
-// Each path may be a SKILL.md file or a directory searched recursively for
-// SKILL.md files. Missing or invalid paths emit warnings. Skills are keyed by
-// discovered file path, so duplicate frontmatter names may coexist.
-func LoadFromPaths(log func(s string), roots []string) map[string]*Skill {
-	skillByFilePath := make(map[string]*Skill)
-	countByRoot := make(map[string]int, len(roots))
-
-	walkSkillFiles(log, roots, func(root, path string) {
-		s, err := loadSkillFile(path)
-		if err != nil {
-			log(fmt.Sprintf("warning: skill %q: %v\n", path, err))
-			return
-		}
-		skillByFilePath[path] = s
-		countByRoot[root]++
-	})
-
-	for _, p := range roots {
-		log(fmt.Sprintf("loaded %d skills from %s\n", countByRoot[p], p))
-	}
-
-	return skillByFilePath
+func loadSkills(log func(string), roots []string) map[string]*Skill {
+	return loadFromPaths(log, roots, "loaded", loadSkillFile)
 }
 
-func PreloadFromPaths(log func(s string), roots []string) map[string]string {
-	skillByFilePath := make(map[string]string)
-	countByRoot := make(map[string]int, len(roots))
-
-	walkSkillFiles(log, roots, func(root, path string) {
+func preloadSkills(log func(string), roots []string) map[string]string {
+	return loadFromPaths(log, roots, "preloaded", func(path string) (string, error) {
 		contents, err := os.ReadFile(path)
-		if err != nil {
-			log(fmt.Sprintf("warning: reading skill file %q: %v\n", path, err))
-			return
-		}
-		skillByFilePath[path] = string(contents)
-		countByRoot[root]++
+		return string(contents), err
 	})
-
-	for _, p := range roots {
-		log(fmt.Sprintf("preloaded %d skills from %s\n", countByRoot[p], p))
-	}
-
-	return skillByFilePath
 }
 
-func walkSkillFiles(log func(s string), roots []string, load func(root, path string)) {
-	visitedPaths := make(map[string]struct{})
+func loadFromPaths[T any](log func(string), roots []string, verb string, parse func(string) (T, error)) map[string]T {
+	result := make(map[string]T)
+	visited := make(map[string]bool)
 	for _, root := range roots {
+		count := 0
 		if err := filepath.WalkDir(root, func(leaf string, d fs.DirEntry, err error) error {
 			if err != nil {
 				log(fmt.Sprintf("warning: walking skill path %q: %v\n", leaf, err))
 				return nil
 			}
-			if _, visited := visitedPaths[leaf]; visited {
+			if visited[leaf] {
 				return nil
 			}
-			visitedPaths[leaf] = struct{}{}
-
+			visited[leaf] = true
 			if d.IsDir() || d.Name() != "SKILL.md" {
 				return nil
 			}
-			load(root, leaf)
+			v, err := parse(leaf)
+			if err != nil {
+				log(fmt.Sprintf("warning: skill %q: %v\n", leaf, err))
+				return nil
+			}
+			result[leaf] = v
+			count++
 			return nil
 		}); err != nil {
 			log(fmt.Sprintf("warning: reading skill path %q: %v\n", root, err))
 		}
+		log(fmt.Sprintf("%s %d skills from %s\n", verb, count, root))
 	}
+	return result
 }
 
 // loadSkillFile parses SKILL.md content according to the Agent Skills specification.
@@ -112,11 +86,7 @@ func readFrontmatter(filePath string) (string, error) {
 	scanner := bufio.NewScanner(f)
 
 	// First line must be "---" (skip BOM if present).
-	if !scanner.Scan() {
-		return "", errors.New("SKILL.md must begin with YAML frontmatter (---)")
-	}
-	firstLine := strings.TrimPrefix(scanner.Text(), "\xef\xbb\xbf")
-	if strings.TrimSpace(firstLine) != "---" {
+	if !scanner.Scan() || strings.TrimSpace(strings.TrimPrefix(scanner.Text(), "\xef\xbb\xbf")) != "---" {
 		return "", errors.New("SKILL.md must begin with YAML frontmatter (---)")
 	}
 

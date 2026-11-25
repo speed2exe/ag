@@ -49,84 +49,72 @@ type Event interface{ isEvent() }
 
 type Output interface{ isOutput() }
 
-type Input interface{ isInput() }
-
-type OutputUnknown struct{ Any any }
-
-func (e *OutputUnknown) isOutput() {}
-func (e *OutputUnknown) isEvent()  {}
-
 type OutputText struct{ Text string }
 
-func (e *OutputText) isOutput() {}
-func (e *OutputText) isEvent()  {}
+func (*OutputText) isOutput() {}
+func (*OutputText) isEvent()  {}
 
 type OutputReasoning struct{ Reasoning string }
 
-func (e *OutputReasoning) isOutput() {}
-func (e *OutputReasoning) isEvent()  {}
+func (*OutputReasoning) isOutput() {}
+func (*OutputReasoning) isEvent()  {}
 
 type OutputFnCall struct{ CallId, Name string }
 
-func (e *OutputFnCall) isOutput() {}
-func (e *OutputFnCall) isEvent()  {}
+func (*OutputFnCall) isOutput() {}
+func (*OutputFnCall) isEvent()  {}
 
 type OutputFnArgs struct{ Args string }
 
-func (e *OutputFnArgs) isOutput() {}
-func (e *OutputFnArgs) isEvent()  {}
+func (*OutputFnArgs) isOutput() {}
+func (*OutputFnArgs) isEvent()  {}
 
 type OutputErr struct{ Err string }
 
-func (e *OutputErr) isOutput()  {}
-func (e *OutputErr) isEvent()   {}
-func (e *OutputErr) isMessage() {}
-
-type InputUnknown struct{ Any any }
-
-func (i *InputUnknown) isInput() {}
-func (i *InputUnknown) isEvent() {}
+func (*OutputErr) isOutput()  {}
+func (*OutputErr) isEvent()   {}
+func (*OutputErr) isMessage() {}
 
 type TokenUsage struct{ InputTokens, InputTokensCached, OutputTokens, OutputTokensReasoning int }
 
-func (i *TokenUsage) isEvent() {}
+func (*TokenUsage) isEvent() {}
 
 type Message interface{ isMessage() }
+
 type UserPrompt struct{ Text string }
 
-func (m *UserPrompt) isMessage() {}
+func (*UserPrompt) isMessage() {}
 
 type AgentReasoning struct{ Reasoning string }
 
-func (m *AgentReasoning) isMessage() {}
+func (*AgentReasoning) isMessage() {}
 
 type AgentResponse struct{ Text string }
 
-func (m *AgentResponse) isMessage() {}
+func (*AgentResponse) isMessage() {}
 
 type ToolCall struct{ CallId, Name, Args, Result string }
 type ToolCalls struct{ Items []*ToolCall }
 
-func (m *ToolCalls) isMessage() {}
-func (m *ToolCalls) isEvent()   {}
-func (m *ToolCalls) isInput()   {}
+func (*ToolCalls) isMessage() {}
+func (*ToolCalls) isEvent()   {}
 
 type ContextId struct{ Id string }
 
-func (c *ContextId) isMessage() {}
+func (*ContextId) isMessage() {}
 
 type Summary struct{ Text string }
 
-func (s *Summary) isMessage() {}
+func (*Summary) isMessage() {}
 
 type Log struct{ Text string }
 
-func (l *Log) isEvent() {}
+func (*Log) isEvent() {}
 
 type Spin struct{}
 
-func (s *Spin) isEvent() {}
+func (*Spin) isEvent() {}
 
 type Compacted struct{ Messages []Message }
 
-func (c *Compacted) isEvent() {}
+func (*Compacted) isEvent() {}

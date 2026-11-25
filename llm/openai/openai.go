@@ -20,7 +20,7 @@ type Client struct {
 	model  string
 }
 
-func New(log func(string), s *setting.Settings) (*Client, error) {
+func New(s *setting.Settings) *Client {
 	var opts []option.RequestOption
 	if s.OpenAIApiKey != "" {
 		opts = append(opts, option.WithAPIKey(s.OpenAIApiKey))
@@ -31,7 +31,7 @@ func New(log func(string), s *setting.Settings) (*Client, error) {
 	return &Client{
 		client: openai.NewClient(opts...),
 		model:  s.OpenAIModel,
-	}, nil
+	}
 }
 
 func (c *Client) GenerateStream(
@@ -40,16 +40,14 @@ func (c *Client) GenerateStream(
 	tools []*tool.Tool,
 	messages []models.Message,
 ) <-chan models.Event {
-	params := responses.ResponseNewParams{
+	stream := c.client.Responses.NewStreaming(ctx, responses.ResponseNewParams{
 		Model:        openai.ResponsesModel(c.model),
 		Instructions: param.NewOpt(strings.Join(instructions, "\n\n")),
 		Input: responses.ResponseNewParamsInputUnion{
 			OfInputItemList: toResponsesInput(messages),
 		},
 		Tools: toResponsesTools(tools),
-	}
-
-	stream := c.client.Responses.NewStreaming(ctx, params)
+	})
 
 	events := make(chan models.Event, 64)
 	go func() {

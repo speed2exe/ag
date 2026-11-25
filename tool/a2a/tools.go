@@ -174,17 +174,13 @@ func newTool[In interface{ agentURL() string }, Out any](
 	name, desc string,
 	fn func(context.Context, *a2aclient.Client, *In) (*Out, error),
 ) *tool.Tool {
-	return (&util.ToolForJsonInputOutput[In, Out]{
-		Name:        name,
-		Description: &desc,
-		Call: func(ctx context.Context, in *In) (*Out, error) {
-			client, err := c.resolveClient((*in).agentURL())
-			if err != nil {
-				return nil, err
-			}
-			return fn(ctx, client, in)
-		},
-	}).MustCompile()
+	return util.NewJSONTool(name, desc, func(ctx context.Context, in *In) (*Out, error) {
+		client, err := c.resolveClient((*in).agentURL())
+		if err != nil {
+			return nil, err
+		}
+		return fn(ctx, client, in)
+	})
 }
 
 func collectStream(seq iter.Seq2[a2acore.Event, error]) (*streamEventsOutput, error) {

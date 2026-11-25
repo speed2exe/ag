@@ -5,7 +5,6 @@ import (
 	"encoding/json/v2"
 	"maps"
 	"slices"
-	"strings"
 
 	"github.com/speed2exe/ag/setting"
 )
@@ -16,52 +15,36 @@ type Skills struct {
 }
 
 // New loads skills from the configured skill paths and stores them in Skills.
-func New(settings *setting.Settings, log func(s string)) *Skills {
+func New(settings *setting.Settings, log func(string)) *Skills {
 	return &Skills{
-		SkillByFilePath:        LoadFromPaths(log, settings.SkillPaths),
-		PreloadSkillByFilePath: PreloadFromPaths(log, settings.PreloadSkillPaths),
+		SkillByFilePath:        loadSkills(log, settings.SkillPaths),
+		PreloadSkillByFilePath: preloadSkills(log, settings.PreloadSkillPaths),
 	}
 }
 
-// Skill represents a loaded Agent Skills package.
-// The format follows https://agentskills.io/specification:
-//   - A skill is a directory containing a SKILL.md file.
-//   - SKILL.md has YAML frontmatter (name, description, …) followed by Markdown instructions.
-//   - Metadata is injected into the agent's instructions at startup.
-//   - Full instructions are loaded on demand when the agent activates the skill.
+// Skill represents a loaded Agent Skills package (https://agentskills.io/specification).
 type Skill struct {
 	Frontmatter any    `json:"frontmatter"` // raw YAML frontmatter as a generic map
 	FilePath    string `json:"file_path"`   // discovered path to the SKILL.md file
 }
 
-// BuildSkillInstructions returns a system-level prompt fragment listing all available skills.
-// Each skill entry includes its name, description, and the path to its SKILL.md file
-// so the model can resolve relative references within the skill body.
-// This is injected into ResponsesRequest.Instructions so the model knows what skills exist.
-func BuildSkillInstructions(ss map[string]*Skill) string {
-	if len(ss) == 0 {
-		return ""
+// BuildInstructions returns system prompt fragments for preloaded and on-demand skills.
+// Entries are sorted to keep prompt order deterministic for prompt cache hits.
+func (s *Skills) BuildInstructions() []string {
+	var instructions []string
+	if len(s.PreloadSkillByFilePath) > 0 {
+		preloaded := slices.Collect(maps.Values(s.PreloadSkillByFilePath))
+		slices.Sort(preloaded)
+		instructions = append(instructions, preloaded...)
 	}
-	skillsList := slices.Collect(maps.Values(ss))
-	// Sort to keep prompt order deterministic for prompt cache hits.
-	slices.SortFunc(skillsList, func(a, b *Skill) int {
-		return cmp.Compare(a.FilePath, b.FilePath)
-	})
-
-	var b strings.Builder
-	b.WriteString("You have access to the following skills. ")
-	b.WriteString("To activate a skill, read the respective SKILL.md.\n")
-	bs, _ := json.Marshal(skillsList)
-	b.Write(bs)
-	return b.String()
-}
-
-func BuildPreloadSkillInstructions(ss map[string]string) []string {
-	if len(ss) == 0 {
-		return nil
+	if len(s.SkillByFilePath) > 0 {
+		list := slices.Collect(maps.Values(s.SkillByFilePath))
+		slices.SortFunc(list, func(a, b *Skill) int {
+			return cmp.Compare(a.FilePath, b.FilePath)
+		})
+		bs, _ := json.Marshal(list)
+		instructions = append(instructions,
+			"You have access to the following skills. To activate a skill, read the respective SKILL.md.\n"+string(bs))
 	}
-	res := slices.Collect(maps.Values(ss))
-	// Sort to keep prompt order deterministic for prompt cache hits.
-	slices.Sort(res)
-	return res
+	return instructions
 }

@@ -7,8 +7,6 @@ const (
 	CompactToolName = "compact"
 )
 
-const LlmInternalToolHandling = "(handled internally by llm)"
-
 // SummarizerBeforeLastUserPrompt is sent (without system instructions or tools)
 // after the full history; its output replaces that entire history and is
 // placed, as a user-role message, before the next user prompt.

@@ -15,47 +15,14 @@ import (
 	"golang.org/x/term"
 )
 
-var (
-	StdinIsTerm = term.IsTerminal(int(os.Stdin.Fd()))
+var StdinIsTerm = term.IsTerminal(int(os.Stdin.Fd()))
 
-	longByShort = func() map[string]string {
-		m := map[string]string{}
-		for _, def := range allSettingDefs {
-			if short := def.shortName(); short != "" {
-				if _, exists := m[short]; exists {
-					panic(fmt.Sprintf("duplicate short option: -%s", short))
-				}
-				m[short] = def.longName()
-			}
-		}
-		return m
-	}()
+type LlmProvider string
 
-	knownLongNames = func() map[string]struct{} {
-		m := map[string]struct{}{"help": {}}
-		for _, def := range allSettingDefs {
-			m[def.longName()] = struct{}{}
-		}
-		return m
-	}()
-
-	homeDir = func() string {
-		h, err := os.UserHomeDir()
-		if err != nil {
-			log.Errorf("error getting user home directory: %v", err)
-			return ""
-		}
-		return h
-	}()
-	defaultLogPath                     = "./ag.log"
-	defaultInstructionPath             = filepath.Join(homeDir, ".ag", "instruction.md")
-	defaultSessionPath                 = filepath.Join(homeDir, ".ag", "sessions.json")
-	defaultContextDir                  = filepath.Join(homeDir, ".ag", "contexts")
-	defaultContextTtl                  = 7 * 24 * time.Hour // 7 days
-	defaultHistoryFilePath             = filepath.Join(homeDir, ".ag", "history.json")
-	defaultMaxHistoryCount             = 128
-	defaultMaxMessagesBeforeUserPrompt = 32
-	defaultMaxMessagesAfterUserPrompt  = 64
+const (
+	LlmProviderAnthropic LlmProvider = "anthropic"
+	LlmProviderOpenAI    LlmProvider = "openai"
+	LlmProviderGemini    LlmProvider = "gemini"
 )
 
 type Settings struct {
@@ -76,9 +43,9 @@ type Settings struct {
 	MaxMessagesBeforeUserPrompt int
 	MaxMessagesAfterUserPrompt  int
 
-	UserInput strings.Builder
+	UserInput string
 
-	LlmProvider LllmProvider
+	LlmProvider LlmProvider
 
 	AnthropicBaseUrl string
 	AnthropicModel   string
@@ -92,47 +59,69 @@ type Settings struct {
 	GeminiModel   string
 }
 
+func defaultSettings() Settings {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		log.Errorf("error getting user home directory: %v", err)
+	}
+	return Settings{
+		LogFilePath:                 "./ag.log",
+		InstructionPath:             filepath.Join(homeDir, ".ag", "instruction.md"),
+		SessionPath:                 filepath.Join(homeDir, ".ag", "sessions.json"),
+		ContextDir:                  filepath.Join(homeDir, ".ag", "contexts"),
+		ContextTtl:                  7 * 24 * time.Hour,
+		HistoryFilePath:             filepath.Join(homeDir, ".ag", "history.json"),
+		HistoryMaxCount:             128,
+		MaxMessagesBeforeUserPrompt: 32,
+		MaxMessagesAfterUserPrompt:  64,
+	}
+}
+
 func Init() (*Settings, error) {
+	p := defaultSettings()
+	defs := p.flagDefs()
+
 	if slices.ContainsFunc(os.Args[1:], func(arg string) bool { return arg == "-h" || arg == "--help" }) {
-		printHelp()
+		printHelp(defs)
 		os.Exit(0)
 	}
 
-	cliArgs, err := parseCliArgs(os.Args[1:])
+	cliArgs, err := parseCliArgs(os.Args[1:], defs)
 	if err != nil {
 		return nil, fmt.Errorf("error initializing settings: error parsing command-line arguments: %w", err)
 	}
 
-	p := Settings{}
-	for _, f := range allSettingDefs {
-		haveApplied := f.applyDefault(&p)
-
-		applied, err := f.applyEnv(&p)
-		if err != nil {
-			return nil, fmt.Errorf("error initializing settings: %w", err)
-		}
-		haveApplied = haveApplied || applied
-
-		applied, err = f.applyArgs(&p, cliArgs)
-		if err != nil {
-			return nil, fmt.Errorf("error initializing settings: %w", err)
-		}
-		haveApplied = haveApplied || applied
-
-		if !haveApplied {
-			var envHelpText string
-			if envName := f.envName(); envName != "" {
-				envHelpText = fmt.Sprintf(" or environment variable %s", envName)
+	for _, f := range defs {
+		applied := false
+		if f.env != "" {
+			if value, ok := os.LookupEnv(f.env); ok {
+				if err := f.parse(value); err != nil {
+					return nil, fmt.Errorf("error initializing settings: error parsing environment variable %s: %w", f.env, err)
+				}
+				applied = true
 			}
-			return nil, fmt.Errorf("error initializing settings: missing required setting: --%s%s", f.longName(), envHelpText)
+		}
+		if values, ok := cliArgs[f.name]; ok {
+			if err := f.applyArgs(values); err != nil {
+				return nil, fmt.Errorf("error initializing settings: error parsing command-line argument --%s: %w", f.name, err)
+			}
+			applied = true
+		}
+		if f.required && !applied {
+			envHelp := ""
+			if f.env != "" {
+				envHelp = " or environment variable " + f.env
+			}
+			return nil, fmt.Errorf("error initializing settings: missing required setting: --%s%s", f.name, envHelp)
 		}
 	}
 
-	// If stdin is piped, read user input into UserInput.
 	if !StdinIsTerm {
-		if _, err := io.Copy(&p.UserInput, os.Stdin); err != nil {
+		bs, err := io.ReadAll(os.Stdin)
+		if err != nil {
 			return nil, fmt.Errorf("error initializing settings: error reading user input from stdin: %w", err)
 		}
+		p.UserInput = string(bs)
 	}
 
 	if p.SessionKey != "" && p.ContextId != "" {
@@ -142,7 +131,198 @@ func Init() (*Settings, error) {
 	return &p, nil
 }
 
-func parseCliArgs(argv []string) (map[string][]*string, error) {
+type flagDef struct {
+	name       string
+	short      string
+	env        string
+	desc       string
+	defDisplay string
+	required   bool
+	isBool     bool
+	parse      func(string) error
+	applyArgs  func([]*string) error
+}
+
+func (s *Settings) flagDefs() []flagDef {
+	return []flagDef{
+		strFlag(&s.InstructionPath, "instruction-path", "", "AG_INSTRUCTION_PATH",
+			"Path to a Markdown file whose contents are prepended to the system prompt"),
+		strFlag(&s.LogFilePath, "log-path", "", "AG_LOG_PATH",
+			"Log file path"),
+		boolFlag(&s.LoggingEnabled, "logging-enabled", "AG_LOGGING_ENABLED",
+			"Enable logging to file. By default, logging is disabled. If enabled, logs will be written to the path specified by --log-path."),
+		strFlag(&s.SessionPath, "session-path", "", "AG_SESSION_PATH",
+			"Path to a JSON file that stores mapping of session keys to context IDs"),
+		strFlag(&s.SessionKey, "session-key", "s", "AG_SESSION_KEY",
+			"Specify a session key to use for this run or resume a previous session, session key is mapped to a context ID and would be updated on conversation turn."),
+		strFlag(&s.ContextDir, "context-dir", "", "AG_CONTEXT_DIR",
+			"Directory to store conversation contexts."),
+		strFlag(&s.ContextId, "context-id", "c", "AG_CONTEXT_ID",
+			"Context ID from a previous run, to continue a prior conversation"),
+		durationFlag(&s.ContextTtl, "context-ttl", "AG_CONTEXT_TTL",
+			"Time-to-live for conversation contexts. Contexts older than this duration will be automatically deleted."),
+		strSliceFlag(&s.SkillPaths, "skill-paths", "AG_SKILL_PATHS",
+			"comma-separated list of paths to search for skill definitions. Paths can be directories or SKILL.md files. Directories are searched recursively for SKILL.md files."),
+		strSliceFlag(&s.PreloadSkillPaths, "preload-skill-paths", "AG_PRELOAD_SKILL_PATHS",
+			"like skill-paths but loaded during agent initialization instead of on demand. Use this for skills that must be available from the start."),
+		strSliceFlag(&s.McpConfPaths, "mcp-conf-paths", "AG_MCP_CONF_PATHS",
+			"comma-separated list of paths to MCP config files. See: https://gofastmcp.com/integrations/mcp-json-configuration"),
+		strSliceFlag(&s.A2aUrls, "a2a-urls", "AG_A2A_URLS",
+			"comma-separated list of a2a urls. See: https://a2a-protocol.org/latest/"),
+		strFlag(&s.HistoryFilePath, "history-file-path", "", "AG_HISTORY_FILE_PATH",
+			"Directory to store historical user input"),
+		intFlag(&s.HistoryMaxCount, "history-max-count", "AG_HISTORY_MAX_COUNT",
+			"Maximum number of historical user input to keep"),
+		intFlag(&s.MaxMessagesBeforeUserPrompt, "max-messages-before-user-prompt", "AG_MAX_MESSAGES_BEFORE_USER_PROMPT",
+			"Maximum number of messages to keep before the last user prompt, older messages will be summarized and replaced with a summary message"),
+		intFlag(&s.MaxMessagesAfterUserPrompt, "max-messages-after-user-prompt", "AG_MAX_MESSAGES_AFTER_USER_PROMPT",
+			"Maximum number of messages to keep after the last user prompt, older messages will be summarized and replaced with a summary message"),
+		valueFlag("llm-provider", "", "AG_LLM_PROVIDER",
+			"LLM provider to use, e.g. 'anthropic', 'openai', or 'gemini'", "", true,
+			func(v string) error {
+				switch LlmProvider(v) {
+				case LlmProviderAnthropic, LlmProviderOpenAI, LlmProviderGemini:
+					s.LlmProvider = LlmProvider(v)
+					return nil
+				default:
+					return fmt.Errorf("unsupported llm provider: %s", v)
+				}
+			}),
+		strFlag(&s.AnthropicBaseUrl, "anthropic-base-url", "", "AG_ANTHROPIC_BASE_URL",
+			"Anthropic API base URL"),
+		strFlag(&s.AnthropicModel, "anthropic-model", "", "AG_ANTHROPIC_MODEL",
+			"Anthropic model name, e.g. glm-5"),
+		strFlag(&s.OpenAIBaseURL, "openai-base-url", "", "AG_OPENAI_BASE_URL",
+			"OpenAI-compatible API base URL"),
+		strFlag(&s.OpenAIApiKey, "openai-api-key", "", "AG_OPENAI_API_KEY",
+			"OpenAI API key"),
+		strFlag(&s.OpenAIModel, "openai-model", "", "AG_OPENAI_MODEL",
+			"OpenAI model name, e.g. gpt-4o"),
+		strFlag(&s.GeminiBaseURL, "gemini-base-url", "", "AG_GEMINI_BASE_URL",
+			"Gemini API base URL"),
+		strFlag(&s.GeminiApiKey, "gemini-api-key", "", "AG_GEMINI_API_KEY",
+			"Gemini API key (falls back to GEMINI_API_KEY / GOOGLE_API_KEY)"),
+		strFlag(&s.GeminiModel, "gemini-model", "", "AG_GEMINI_MODEL",
+			"Gemini model name, e.g. gemini-4-hydrogen"),
+	}
+}
+
+func valueFlag(name, short, env, desc, defDisplay string, required bool, parse func(string) error) flagDef {
+	return flagDef{
+		name:       name,
+		short:      short,
+		env:        env,
+		desc:       desc,
+		defDisplay: defDisplay,
+		required:   required,
+		parse:      parse,
+		applyArgs: func(values []*string) error {
+			val := values[len(values)-1]
+			if val == nil {
+				return errors.New("expected value for flag but got none")
+			}
+			return parse(*val)
+		},
+	}
+}
+
+func strFlag(dst *string, name, short, env, desc string) flagDef {
+	return valueFlag(name, short, env, desc, *dst, false, func(v string) error {
+		*dst = v
+		return nil
+	})
+}
+
+func intFlag(dst *int, name, env, desc string) flagDef {
+	return valueFlag(name, "", env, desc, strconv.Itoa(*dst), false, func(v string) error {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return err
+		}
+		*dst = n
+		return nil
+	})
+}
+
+func durationFlag(dst *time.Duration, name, env, desc string) flagDef {
+	def := ""
+	if *dst != 0 {
+		def = dst.String()
+	}
+	return valueFlag(name, "", env, desc, def, false, func(v string) error {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return err
+		}
+		*dst = d
+		return nil
+	})
+}
+
+func boolFlag(dst *bool, name, env, desc string) flagDef {
+	parse := func(v string) error {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return err
+		}
+		*dst = b
+		return nil
+	}
+	return flagDef{
+		name:       name,
+		env:        env,
+		desc:       desc,
+		defDisplay: strconv.FormatBool(*dst),
+		isBool:     true,
+		parse:      parse,
+		applyArgs: func(values []*string) error {
+			val := values[len(values)-1]
+			if val == nil {
+				*dst = true // flag present without a value → true
+				return nil
+			}
+			return parse(*val)
+		},
+	}
+}
+
+func strSliceFlag(dst *[]string, name, env, desc string) flagDef {
+	appendSplit := func(s string) {
+		for p := range strings.SplitSeq(s, ",") {
+			if t := strings.TrimSpace(p); t != "" {
+				*dst = append(*dst, t)
+			}
+		}
+	}
+	return flagDef{
+		name:  name,
+		env:   env,
+		desc:  desc,
+		parse: func(v string) error { appendSplit(v); return nil },
+		applyArgs: func(values []*string) error {
+			for _, v := range values {
+				if v != nil {
+					appendSplit(*v)
+				}
+			}
+			return nil
+		},
+	}
+}
+
+func parseCliArgs(argv []string, defs []flagDef) (map[string][]*string, error) {
+	longByShort := make(map[string]string)
+	knownLong := map[string]bool{"help": true}
+	for _, def := range defs {
+		knownLong[def.name] = true
+		if def.short != "" {
+			if _, exists := longByShort[def.short]; exists {
+				panic(fmt.Sprintf("duplicate short option: -%s", def.short))
+			}
+			longByShort[def.short] = def.name
+		}
+	}
+
 	args := map[string][]*string{}
 	for i := 0; i < len(argv); {
 		first := argv[i]
@@ -160,7 +340,7 @@ func parseCliArgs(argv []string) (map[string][]*string, error) {
 				return nil, fmt.Errorf("unknown short option: -%s", key)
 			}
 			key = longName
-		} else if _, ok := knownLongNames[key]; !ok {
+		} else if !knownLong[key] {
 			return nil, fmt.Errorf("unknown option: --%s", key)
 		}
 
@@ -175,402 +355,34 @@ func parseCliArgs(argv []string) (map[string][]*string, error) {
 	return args, nil
 }
 
-type settingDef interface {
-	longName() string
-	shortName() string
-	envName() string
-	applyDefault(*Settings) bool
-	applyEnv(*Settings) (bool, error)
-	applyArgs(*Settings, map[string][]*string) (bool, error)
-	usageFlag() usageFlag
-}
-
-type usageFlag struct {
-	longName        string
-	shortName       string
-	envName         string
-	expectsValue    bool
-	description     string
-	defaultValue    string
-	hasDefaultValue bool
-	required        bool
-}
-
-type flagDefImpl[T any] struct {
-	defVal *T // keep it nil if this field must be set by the user
-	name   string
-	short  string
-	env    string
-	desc   string
-
-	apply      func(*Settings, T) error
-	fromStr    func(string) (T, error)
-	fromStrArr func([]*string) (T, error) // nil defaults to strFromLastArg + fromStr
-}
-
-func (f *flagDefImpl[T]) longName() string  { return f.name }
-func (f *flagDefImpl[T]) shortName() string { return f.short }
-func (f *flagDefImpl[T]) envName() string   { return f.env }
-
-func (f *flagDefImpl[T]) applyDefault(s *Settings) bool {
-	if f.defVal == nil {
-		return false
-	}
-	if err := f.apply(s, *f.defVal); err != nil {
-		panic(fmt.Sprintf("error applying default value for --%s: %v", f.name, err))
-	}
-	return true
-}
-
-func (f *flagDefImpl[T]) applyEnv(s *Settings) (bool, error) {
-	if f.env == "" {
-		return false, nil
-	}
-	value, exists := os.LookupEnv(f.env)
-	if !exists {
-		return false, nil
-	}
-	parsed, err := f.fromStr(value)
-	if err != nil {
-		return false, fmt.Errorf("error parsing environment variable %s: %w", f.env, err)
-	}
-	if err := f.apply(s, parsed); err != nil {
-		return false, fmt.Errorf("error applying environment variable %s: %w", f.env, err)
-	}
-	return true, nil
-}
-
-func (f *flagDefImpl[T]) applyArgs(s *Settings, args map[string][]*string) (bool, error) {
-	values, exists := args[f.name]
-	if !exists {
-		return false, nil
-	}
-	var (
-		parsed T
-		err    error
-	)
-	if f.fromStrArr != nil {
-		parsed, err = f.fromStrArr(values)
-	} else {
-		var raw string
-		if raw, err = strFromLastArg(values); err == nil {
-			parsed, err = f.fromStr(raw)
+func printHelp(defs []flagDef) {
+	out := os.Stdout
+	fmt.Fprintf(out, "Usage: %s [options]\n\n", os.Args[0])
+	fmt.Fprintln(out, "Input:\n  Read the user message from stdin.\n\nOptions:")
+	all := append([]flagDef{{
+		name:   "help",
+		short:  "h",
+		desc:   "Show this help message.",
+		isBool: true,
+	}}, defs...)
+	for _, f := range all {
+		label := "--" + f.name
+		if f.short != "" {
+			label = fmt.Sprintf("-%s, %s", f.short, label)
 		}
-	}
-	if err != nil {
-		return false, fmt.Errorf("error parsing command-line argument --%s: %w", f.name, err)
-	}
-	if err := f.apply(s, parsed); err != nil {
-		return false, fmt.Errorf("error applying command-line argument --%s: %w", f.name, err)
-	}
-	return true, nil
-}
-
-func strFlag(name, short, env, desc, defVal string, set func(*Settings, string)) settingDef {
-	return &flagDefImpl[string]{
-		name:    name,
-		short:   short,
-		env:     env,
-		desc:    desc,
-		defVal:  new(defVal),
-		fromStr: strFromStr,
-		apply:   func(s *Settings, v string) error { set(s, v); return nil },
-	}
-}
-
-func intFlag(name, env, desc string, defVal int, set func(*Settings, int)) settingDef {
-	return &flagDefImpl[int]{
-		name:    name,
-		env:     env,
-		desc:    desc,
-		defVal:  new(defVal),
-		fromStr: strconv.Atoi,
-		apply:   func(s *Settings, v int) error { set(s, v); return nil },
-	}
-}
-
-func durationFlag(name, env, desc string, defVal time.Duration, set func(*Settings, time.Duration)) settingDef {
-	return &flagDefImpl[time.Duration]{
-		name:    name,
-		env:     env,
-		desc:    desc,
-		defVal:  new(defVal),
-		fromStr: time.ParseDuration,
-		apply:   func(s *Settings, v time.Duration) error { set(s, v); return nil },
-	}
-}
-
-func boolFlag(name, env, desc string, defVal bool, set func(*Settings, bool)) settingDef {
-	return &flagDefImpl[bool]{
-		name:       name,
-		env:        env,
-		desc:       desc,
-		defVal:     new(defVal),
-		fromStr:    strconv.ParseBool,
-		fromStrArr: boolFromStrLastArg,
-		apply:      func(s *Settings, v bool) error { set(s, v); return nil },
-	}
-}
-
-func strSliceFlag(name, env, desc string, set func(*Settings, []string)) settingDef {
-	return &flagDefImpl[[]string]{
-		name:       name,
-		env:        env,
-		desc:       desc,
-		defVal:     &[]string{},
-		fromStr:    strArrFromStr,
-		fromStrArr: strArrFromStrArr,
-		apply:      func(s *Settings, v []string) error { set(s, v); return nil },
-	}
-}
-
-var allSettingDefs = []settingDef{
-	strFlag("instruction-path", "", "AG_INSTRUCTION_PATH",
-		"Path to a Markdown file whose contents are prepended to the system prompt",
-		defaultInstructionPath, func(s *Settings, v string) { s.InstructionPath = v }),
-	strFlag("log-path", "", "AG_LOG_PATH",
-		"Log file path",
-		defaultLogPath, func(s *Settings, v string) { s.LogFilePath = v }),
-	boolFlag("logging-enabled", "AG_LOGGING_ENABLED",
-		"Enable logging to file. By default, logging is disabled. If enabled, logs will be written to the path specified by --log-path.",
-		false, func(s *Settings, v bool) { s.LoggingEnabled = v }),
-	strFlag("session-path", "", "AG_SESSION_PATH",
-		"Path to a JSON file that stores mapping of session keys to context IDs",
-		defaultSessionPath, func(s *Settings, v string) { s.SessionPath = v }),
-	strFlag("session-key", "s", "AG_SESSION_KEY",
-		"Specify a session key to use for this run or resume a previous session, session key is mapped to a context ID and would be updated on conversation turn.",
-		"", func(s *Settings, v string) { s.SessionKey = v }),
-	strFlag("context-dir", "", "AG_CONTEXT_DIR",
-		"Directory to store conversation contexts.",
-		defaultContextDir, func(s *Settings, v string) { s.ContextDir = v }),
-	strFlag("context-id", "c", "AG_CONTEXT_ID",
-		"Context ID from a previous run, to continue a prior conversation",
-		"", func(s *Settings, v string) { s.ContextId = v }),
-	durationFlag("context-ttl", "AG_CONTEXT_TTL",
-		"Time-to-live for conversation contexts. Contexts older than this duration will be automatically deleted.",
-		defaultContextTtl, func(s *Settings, v time.Duration) { s.ContextTtl = v }),
-	strSliceFlag("skill-paths", "AG_SKILL_PATHS",
-		"comma-separated list of paths to search for skill definitions. Paths can be directories or SKILL.md files. Directories are searched recursively for SKILL.md files.",
-		func(s *Settings, v []string) { s.SkillPaths = append(s.SkillPaths, v...) }),
-	strSliceFlag("preload-skill-paths", "AG_PRELOAD_SKILL_PATHS",
-		"like skill-paths but loaded during agent initialization instead of on demand. Use this for skills that must be available from the start.",
-		func(s *Settings, v []string) { s.PreloadSkillPaths = append(s.PreloadSkillPaths, v...) }),
-	strSliceFlag("mcp-conf-paths", "AG_MCP_CONF_PATHS",
-		"comma-separated list of paths to MCP config files. See: https://gofastmcp.com/integrations/mcp-json-configuration",
-		func(s *Settings, v []string) { s.McpConfPaths = append(s.McpConfPaths, v...) }),
-	strSliceFlag("a2a-urls", "AG_A2A_URLS",
-		"comma-separated list of a2a urls. See: https://a2a-protocol.org/latest/",
-		func(s *Settings, v []string) { s.A2aUrls = append(s.A2aUrls, v...) }),
-	strFlag("history-file-path", "", "AG_HISTORY_FILE_PATH",
-		"Directory to store historical user input",
-		defaultHistoryFilePath, func(s *Settings, v string) { s.HistoryFilePath = v }),
-	intFlag("history-max-count", "AG_HISTORY_MAX_COUNT",
-		"Maximum number of historical user input to keep",
-		defaultMaxHistoryCount, func(s *Settings, v int) { s.HistoryMaxCount = v }),
-	intFlag("max-messages-before-user-prompt", "AG_MAX_MESSAGES_BEFORE_USER_PROMPT",
-		"Maximum number of messages to keep before the last user prompt, older messages will be summarized and replaced with a summary message",
-		defaultMaxMessagesBeforeUserPrompt, func(s *Settings, v int) { s.MaxMessagesBeforeUserPrompt = v }),
-	intFlag("max-messages-after-user-prompt", "AG_MAX_MESSAGES_AFTER_USER_PROMPT",
-		"Maximum number of messages to keep after the last user prompt, older messages will be summarized and replaced with a summary message",
-		defaultMaxMessagesAfterUserPrompt, func(s *Settings, v int) { s.MaxMessagesAfterUserPrompt = v }),
-
-	&flagDefImpl[string]{
-		name:    "llm-provider",
-		env:     "AG_LLM_PROVIDER",
-		desc:    "LLM provider to use, e.g. 'anthropic', 'openai', or 'gemini'",
-		fromStr: strFromStr,
-		apply:   setLLmProvider,
-	},
-
-	strFlag("anthropic-base-url", "", "AG_ANTHROPIC_BASE_URL",
-		"Anthropic API base URL",
-		"", func(s *Settings, v string) { s.AnthropicBaseUrl = v }),
-	strFlag("anthropic-model", "", "AG_ANTHROPIC_MODEL",
-		"Anthropic model name, e.g. glm-5",
-		"", func(s *Settings, v string) { s.AnthropicModel = v }),
-
-	strFlag("openai-base-url", "", "AG_OPENAI_BASE_URL",
-		"OpenAI-compatible API base URL",
-		"", func(s *Settings, v string) { s.OpenAIBaseURL = v }),
-	strFlag("openai-api-key", "", "AG_OPENAI_API_KEY",
-		"OpenAI API key",
-		"", func(s *Settings, v string) { s.OpenAIApiKey = v }),
-	strFlag("openai-model", "", "AG_OPENAI_MODEL",
-		"OpenAI model name, e.g. gpt-4o",
-		"", func(s *Settings, v string) { s.OpenAIModel = v }),
-
-	strFlag("gemini-base-url", "", "AG_GEMINI_BASE_URL",
-		"Gemini API base URL",
-		"", func(s *Settings, v string) { s.GeminiBaseURL = v }),
-	strFlag("gemini-api-key", "", "AG_GEMINI_API_KEY",
-		"Gemini API key (falls back to GEMINI_API_KEY / GOOGLE_API_KEY)",
-		"", func(s *Settings, v string) { s.GeminiApiKey = v }),
-	strFlag("gemini-model", "", "AG_GEMINI_MODEL",
-		"Gemini model name, e.g. gemini-4-hydrogen",
-		"", func(s *Settings, v string) { s.GeminiModel = v }),
-}
-
-func strFromStr(s string) (string, error) { return s, nil }
-
-func strFromLastArg(arr []*string) (string, error) {
-	if len(arr) == 0 {
-		return "", errors.New("expected at least one value but got none")
-	}
-	val := arr[len(arr)-1]
-	if val == nil {
-		return "", errors.New("expected value for flag but got none")
-	}
-	return *val, nil
-}
-
-func boolFromStrLastArg(arr []*string) (bool, error) {
-	if len(arr) == 0 {
-		return false, errors.New("expected at least one value but got none")
-	}
-	val := arr[len(arr)-1]
-	if val == nil {
-		return true, nil // flag present without a value → true
-	}
-	return strconv.ParseBool(*val)
-}
-
-func strArrFromStr(s string) ([]string, error) {
-	var result []string
-	for p := range strings.SplitSeq(s, ",") {
-		if t := strings.TrimSpace(p); t != "" {
-			result = append(result, t)
+		if !f.isBool {
+			label += " <" + f.name + ">"
 		}
-	}
-	return result, nil
-}
-
-func strArrFromStrArr(arr []*string) ([]string, error) {
-	var result []string
-	for _, s := range arr {
-		if s == nil {
-			continue
+		fmt.Fprintf(out, "  %s\n      %s\n", label, f.desc)
+		if f.defDisplay != "" {
+			fmt.Fprintf(out, "      default: %s\n", f.defDisplay)
+		} else if f.required {
+			envHelp := ""
+			if f.env != "" {
+				envHelp = fmt.Sprintf(" (or set %s)", f.env)
+			}
+			fmt.Fprintf(out, "      required: yes%s\n", envHelp)
 		}
-		parts, err := strArrFromStr(*s)
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, parts...)
-	}
-	return result, nil
-}
-
-func (f *flagDefImpl[T]) usageFlag() usageFlag {
-	var zero T
-	_, isBool := any(zero).(bool)
-
-	flag := usageFlag{
-		longName:     f.name,
-		shortName:    f.short,
-		envName:      f.env,
-		expectsValue: !isBool,
-		description:  f.desc,
-		// An environment variable is an alternative way of supplying the
-		// value, not a fallback for it, so only a default value can make a
-		// setting optional. This mirrors the check in Init.
-		required: f.defVal == nil,
-	}
-
-	if f.defVal != nil {
-		if rendered, ok := formatDefaultValue(*f.defVal); ok {
-			flag.defaultValue = rendered
-			flag.hasDefaultValue = true
-		}
-	}
-
-	return flag
-}
-
-func printHelp() {
-	flags := []usageFlag{
-		{
-			longName:    "help",
-			shortName:   "h",
-			description: "Show this help message.",
-		},
-	}
-	for _, def := range allSettingDefs {
-		flags = append(flags, def.usageFlag())
-	}
-	writeUsage(os.Stdout, os.Args[0], flags)
-}
-
-func writeUsage(output io.Writer, programName string, flags []usageFlag) {
-	fmt.Fprintf(output, "Usage: %s [options]\n\n", programName)
-	fmt.Fprintln(output, "Input:")
-	fmt.Fprintln(output, "  Read the user message from stdin.")
-	fmt.Fprintln(output)
-	fmt.Fprintln(output, "Options:")
-	for _, flag := range flags {
-		printFlagHelp(output, flag)
-	}
-}
-
-func printFlagHelp(output io.Writer, flag usageFlag) {
-	fmt.Fprintf(output, "  %s\n", flagLabel(flag))
-	fmt.Fprintf(output, "      %s\n", flag.description)
-	if flag.hasDefaultValue {
-		fmt.Fprintf(output, "      default: %s\n", flag.defaultValue)
-	} else if flag.required {
-		envHelpText := ""
-		if flag.envName != "" {
-			envHelpText = fmt.Sprintf(" (or set %s)", flag.envName)
-		}
-		fmt.Fprintf(output, "      required: yes%s\n", envHelpText)
-	}
-	fmt.Fprintln(output)
-}
-
-func flagLabel(flag usageFlag) string {
-	label := "--" + flag.longName
-	if strings.TrimSpace(flag.shortName) != "" {
-		label = fmt.Sprintf("-%s, %s", flag.shortName, label)
-	}
-	if flag.expectsValue {
-		label += " <" + flag.longName + ">"
-	}
-	return label
-}
-
-// formatDefaultValue renders a default value for the help output. The second
-// return value reports whether the value is worth showing: several optional
-// settings use a zero defVal (`new("")`, `&[]string{}`) merely to mark
-// themselves as not required, and the zero value carries no information.
-func formatDefaultValue(value any) (string, bool) {
-	switch v := value.(type) {
-	case string:
-		return v, v != ""
-	case []string:
-		return strings.Join(v, ", "), len(v) > 0
-	case time.Duration:
-		return v.String(), v != 0
-	case bool:
-		// For a boolean flag, false is a meaningful value ("disabled"), not
-		// a sign of a missing default.
-		return strconv.FormatBool(v), true
-	default:
-		return fmt.Sprint(v), true
-	}
-}
-
-type LllmProvider string
-
-const (
-	LlmProviderAnthropic LllmProvider = "anthropic"
-	LlmProviderOpenAI    LllmProvider = "openai"
-	LlmProviderGemini    LllmProvider = "gemini"
-)
-
-func setLLmProvider(p *Settings, provider string) error {
-	switch LllmProvider(provider) {
-	case LlmProviderAnthropic, LlmProviderOpenAI, LlmProviderGemini:
-		p.LlmProvider = LllmProvider(provider)
-		return nil
-	default:
-		return fmt.Errorf("unsupported llm provider: %s", provider)
+		fmt.Fprintln(out)
 	}
 }

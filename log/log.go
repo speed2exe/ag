@@ -9,32 +9,22 @@ import (
 	"os"
 )
 
-var (
-	enabled bool
-)
+var enabled bool
 
-// Init opens (or creates) the log file specified by arg.V.LogFilePath when
-// logging is enabled, and redirects the standard logger output to that file.
-// It is a no-op when logging is disabled.
-func Init(filepath *string) error {
-	if filepath != nil {
-		f, err := os.Create(*filepath)
-		if err != nil {
-			return fmt.Errorf("failed to open log file: %w", err)
-		}
-		log.SetOutput(f)
-		enabled = true
-	} else {
+// Init opens (or creates) the log file at filepath and enables logging.
+// It is a no-op when filepath is empty.
+func Init(filepath string) error {
+	if filepath == "" {
 		enabled = false
+		return nil
 	}
+	f, err := os.Create(filepath)
+	if err != nil {
+		return fmt.Errorf("failed to open log file: %w", err)
+	}
+	log.SetOutput(f)
+	enabled = true
 	return nil
-}
-
-// Debugf logs a formatted message at DEBUG level. It is a no-op when logging is disabled.
-func Debugf(format string, v ...any) {
-	if enabled {
-		log.Printf("[DEBUG] "+format, v...)
-	}
 }
 
 // Infof logs a formatted message at INFO level. It is a no-op when logging is disabled.
@@ -56,10 +46,4 @@ func Errorf(format string, v ...any) {
 	if enabled {
 		log.Printf("[ERROR] "+format, v...)
 	}
-}
-
-// Fatalf logs a formatted message at FATAL level and terminates the process.
-// Unlike the other log functions, this always runs regardless of the logging flag.
-func Fatalf(format string, v ...any) {
-	log.Fatalf("[FATAL] "+format, v...)
 }

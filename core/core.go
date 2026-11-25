@@ -28,9 +28,12 @@ func GenerateStream(ctx context.Context,
 ) (string, <-chan models.Event) {
 	st := state.GetState(ctx)
 	userPrompt := &models.UserPrompt{Text: prompt}
-	messages, err := getMessagesFromContextId(st.CtxStore, ctxId)
-	if err != nil {
-		st.Printer.Print(printer.ColorRed, fmt.Sprintf("failed to get context for id %s: %v", ctxId, err), printer.Reset)
+	var messages []models.Message
+	if ctxId != "" {
+		var err error
+		if messages, err = st.CtxStore.Load(ctxId); err != nil {
+			st.Printer.Print(printer.ColorRed, fmt.Sprintf("failed to get context for id %s: %v", ctxId, err), printer.Reset)
+		}
 	}
 	newCtxId := time.Now().Format(time.RFC3339Nano)
 
@@ -38,33 +41,37 @@ func GenerateStream(ctx context.Context,
 	go func() {
 		defer close(events)
 
-		contextRecorder := &ContextRecorder{store: st.CtxStore}
+		recorder := &contextRecorder{store: st.CtxStore}
 		if len(messages) > st.Settings.MaxMessagesBeforeUserPrompt {
-			summary, err := summarizeMessagesBeforeUserPrompt(ctx, model, messages, events)
+			summary, err := summarizeMessagesWithPrompt(ctx, model, messages,
+				consts.SummarizerBeforeLastUserPrompt,
+				"Summarizing messages before last user prompt to reduce context length...",
+				"Finished summarizing messages.",
+				events)
 			if err != nil {
 				st.Printer.Print(printer.ColorRed, fmt.Sprintf("failed to summarize messages: %v", err), printer.Reset)
 				// Only take the last MaxMessagesBeforeUserPrompt messages as context.
 				// The recorder and model mutate their own slices, so clone them separately.
 				trimmed := messages[len(messages)-st.Settings.MaxMessagesBeforeUserPrompt:]
-				contextRecorder.messages = slices.Clone(trimmed)
+				recorder.messages = slices.Clone(trimmed)
 				messages = slices.Clone(trimmed)
 			} else {
-				contextRecorder.messages = []models.Message{summary}
+				recorder.messages = []models.Message{summary}
 				// Keep the last assistant message after the summary so a pending question isn't lost.
-				messages = append(make([]models.Message, 0, 2), summary, messages[len(messages)-1])
+				messages = []models.Message{summary, messages[len(messages)-1]}
 			}
 		} else if ctxId != "" {
-			contextRecorder.messages = []models.Message{&models.ContextId{Id: ctxId}}
+			recorder.messages = []models.Message{&models.ContextId{Id: ctxId}}
 		}
 
 		// Add current user prompt.
-		contextRecorder.messages = append(contextRecorder.messages, userPrompt)
+		recorder.messages = append(recorder.messages, userPrompt)
 		messages = append(messages, userPrompt)
 
 		innerEvents := util.FeedChan(generateStream(ctx, model, tools, instructions, messages), events)
 		events <- &models.Spin{}
-		util.StreamActions(innerEvents, contextRecorder.record)
-		if err := contextRecorder.saveToStore(newCtxId); err != nil {
+		util.StreamActions(innerEvents, recorder.record)
+		if err := recorder.saveToStore(newCtxId); err != nil {
 			log.Errorf("failed to save context for id %s: %v", newCtxId, err)
 		}
 		log.Infof("saved context for id %s", newCtxId)
@@ -136,28 +143,27 @@ func generateStream(ctx context.Context,
 			}
 
 			curEvents := util.FeedChan(model.GenerateStream(ctx, instructions, tools, messages), events)
-			toolCallExtractor := &ToolCallExtractor{toolCalls: &models.ToolCalls{}}
-			outputCollector := &OutputCollector{}
-			util.StreamActions(curEvents, toolCallExtractor.extract, outputCollector.collect)
+			extractor := &toolCallExtractor{toolCalls: &models.ToolCalls{}}
+			output := &outputAccumulator{}
+			util.StreamActions(curEvents, extractor.extract, output.collect)
 
-			outputCollector.finalize()
-			messages = append(messages, outputCollector.messages...)
+			output.finalize()
+			messages = append(messages, output.messages...)
 
-			toolCallExtractor.finalize()
-			toolCalls := toolCallExtractor.toolCalls
-			if len(toolCalls.Items) == 0 {
+			extractor.finalize()
+			if len(extractor.toolCalls.Items) == 0 {
 				return
 			}
 
-			for _, toolCall := range toolCalls.Items {
+			for _, toolCall := range extractor.toolCalls.Items {
 				if ctx.Err() != nil {
 					return
 				}
-				toolCall.Result = executeToolCall(ctx, model, tools, toolCall)
+				toolCall.Result = executeToolCall(ctx, tools, toolCall)
 			}
 
-			events <- toolCalls
-			messages = append(messages, toolCalls)
+			events <- extractor.toolCalls
+			messages = append(messages, extractor.toolCalls)
 		}
 	}()
 
@@ -203,68 +209,33 @@ func maybeCompactMessages(
 	return next, true
 }
 
-func executeToolCall(ctx context.Context, model llm.Model, tools []*tool.Tool, tc *models.ToolCall) string {
-	if t, ok := lookupToolByName(tools, tc.Name); ok {
-		output, err := runWithContext(ctx, "tool call cancelled", func() ([]byte, error) {
-			return t.Call(ctx, []byte(tc.Args))
-		})
-		if err != nil {
-			return fmt.Sprintf("failed to call tool %s: %v", tc.Name, err)
-		}
-		return string(output)
+func executeToolCall(ctx context.Context, tools []*tool.Tool, tc *models.ToolCall) string {
+	idx := slices.IndexFunc(tools, func(t *tool.Tool) bool { return t.Name == tc.Name })
+	if idx < 0 {
+		return fmt.Sprintf("tool %s not found", tc.Name)
 	}
 
-	if toolCaller, ok := model.(llm.ToolCaller); ok {
-		type llmResult struct {
-			output string
-			found  bool
-		}
-		res, err := runWithContext(ctx, "llm tool call cancelled", func() (llmResult, error) {
-			out, found, err := toolCaller.CallTool(ctx, tc.Name, tc.Args)
-			return llmResult{output: out, found: found}, err
-		})
-		if err != nil {
-			return fmt.Sprintf("failed to call tool %s: %v", tc.Name, err)
-		}
-		if res.found {
-			return res.output
-		}
-	}
-
-	return fmt.Sprintf("tool %s not found", tc.Name)
-}
-
-func runWithContext[T any](ctx context.Context, cancelMsg string, fn func() (T, error)) (T, error) {
 	var (
-		result T
+		output []byte
 		err    error
 	)
 	done := make(chan struct{}, 1)
 	go func() {
 		defer func() { done <- struct{}{} }()
-		result, err = fn()
+		output, err = tools[idx].Call(ctx, []byte(tc.Args))
 	}()
 	select {
 	case <-ctx.Done():
-		var zero T
-		return zero, fmt.Errorf("%s: %w", cancelMsg, ctx.Err())
+		return fmt.Sprintf("failed to call tool %s: tool call cancelled: %v", tc.Name, ctx.Err())
 	case <-done:
-		return result, err
+		if err != nil {
+			return fmt.Sprintf("failed to call tool %s: %v", tc.Name, err)
+		}
+		return string(output)
 	}
 }
 
-func getMessagesFromContextId(ctxStore *store.CtxStore, contextId string) ([]models.Message, error) {
-	if contextId == "" {
-		return nil, nil
-	}
-	msgs, err := ctxStore.Load(contextId)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load context for id %s: %w", contextId, err)
-	}
-	return msgs, nil
-}
-
-type ToolCallExtractor struct {
+type toolCallExtractor struct {
 	currentCallId   string
 	currentToolName string
 	currentArgs     strings.Builder
@@ -272,7 +243,7 @@ type ToolCallExtractor struct {
 	toolCalls *models.ToolCalls
 }
 
-func (t *ToolCallExtractor) extract(event models.Event) {
+func (t *toolCallExtractor) extract(event models.Event) {
 	switch e := event.(type) {
 	case *models.OutputFnCall:
 		t.finalize()
@@ -285,7 +256,7 @@ func (t *ToolCallExtractor) extract(event models.Event) {
 	}
 }
 
-func (t *ToolCallExtractor) finalize() {
+func (t *toolCallExtractor) finalize() {
 	if t.currentCallId != "" && t.currentToolName != "" {
 		args := t.currentArgs.String()
 		if args == "" {
@@ -306,136 +277,95 @@ func (t *ToolCallExtractor) finalize() {
 	t.currentArgs.Reset()
 }
 
-// ContextRecorder records the messages of a conversation so that they can be
+// contextRecorder records the messages of a conversation so that they can be
 // used as context in later turns.
-type ContextRecorder struct {
-	outputAccumulator outputAccumulator
-	store             *store.CtxStore
-	messages          []models.Message
+type contextRecorder struct {
+	outputAccumulator
+	store *store.CtxStore
 }
 
-func (c *ContextRecorder) record(event models.Event) {
+func (c *contextRecorder) record(event models.Event) {
 	if e, ok := event.(*models.Compacted); ok {
 		// Discard any output accumulated from summarization before replacing messages.
-		c.outputAccumulator = outputAccumulator{}
-		c.messages = slices.Clone(e.Messages)
+		c.outputAccumulator = outputAccumulator{messages: slices.Clone(e.Messages)}
 		return
 	}
-	c.messages = append(c.messages, c.outputAccumulator.collect(event)...)
+	c.collect(event)
 	switch e := event.(type) {
 	case *models.OutputErr, *models.ToolCalls:
 		c.messages = append(c.messages, e.(models.Message))
 	}
 }
 
-func (c *ContextRecorder) saveToStore(ctxId string) error {
-	c.messages = append(c.messages, c.outputAccumulator.finalize()...)
+func (c *contextRecorder) saveToStore(ctxId string) error {
+	c.finalize()
 	return c.store.Save(ctxId, c.messages)
 }
 
 type outputAccumulator struct {
-	outputReasoningAcc strings.Builder
-	outputTextAcc      strings.Builder
+	reasoning strings.Builder
+	text      strings.Builder
+	messages  []models.Message
 }
 
-func (o *outputAccumulator) collect(event models.Event) []models.Message {
+func (o *outputAccumulator) collect(event models.Event) {
 	switch e := event.(type) {
 	case *models.OutputReasoning:
-		var messages []models.Message
-		if o.outputTextAcc.Len() > 0 {
-			messages = o.finalize()
+		if o.text.Len() > 0 {
+			o.finalize()
 		}
-		o.outputReasoningAcc.WriteString(e.Reasoning)
-		return messages
+		o.reasoning.WriteString(e.Reasoning)
 	case *models.OutputText:
-		var messages []models.Message
-		if o.outputReasoningAcc.Len() > 0 {
-			messages = o.finalize()
+		if o.reasoning.Len() > 0 {
+			o.finalize()
 		}
-		o.outputTextAcc.WriteString(e.Text)
-		return messages
+		o.text.WriteString(e.Text)
 	default:
-		return o.finalize()
+		o.finalize()
 	}
 }
 
-func (o *outputAccumulator) finalize() []models.Message {
-	var messages []models.Message
-	if o.outputTextAcc.Len() > 0 {
-		messages = append(messages, &models.AgentResponse{Text: o.outputTextAcc.String()})
-		o.outputTextAcc.Reset()
+func (o *outputAccumulator) finalize() {
+	if o.text.Len() > 0 {
+		o.messages = append(o.messages, &models.AgentResponse{Text: o.text.String()})
+		o.text.Reset()
 	}
-	if o.outputReasoningAcc.Len() > 0 {
-		messages = append(messages, &models.AgentReasoning{Reasoning: o.outputReasoningAcc.String()})
-		o.outputReasoningAcc.Reset()
+	if o.reasoning.Len() > 0 {
+		o.messages = append(o.messages, &models.AgentReasoning{Reasoning: o.reasoning.String()})
+		o.reasoning.Reset()
 	}
-	return messages
-}
-
-// extracts reasoning and output text
-type OutputCollector struct {
-	outputAccumulator outputAccumulator
-	messages          []models.Message
-}
-
-func (o *OutputCollector) collect(event models.Event) {
-	o.messages = append(o.messages, o.outputAccumulator.collect(event)...)
-}
-
-func (o *OutputCollector) finalize() {
-	o.messages = append(o.messages, o.outputAccumulator.finalize()...)
-}
-
-func summarizeMessagesBeforeUserPrompt(ctx context.Context, model llm.Model, messagesBeforeUserPrompt []models.Message, listener chan<- models.Event) (*models.Summary, error) {
-	listener <- &models.Log{Text: "Summarizing messages before last user prompt to reduce context length..."}
-	listener <- &models.Spin{}
-	defer func() {
-		listener <- &models.Log{Text: "Finished summarizing messages."}
-	}()
-
-	return summarizeMessagesWithPrompt(ctx, model, messagesBeforeUserPrompt, consts.SummarizerBeforeLastUserPrompt, listener)
 }
 
 func summarizeMessagesAfterUserPrompt(ctx context.Context, model llm.Model, allMessages []models.Message, listener chan<- models.Event) ([]models.Message, error) {
-	listener <- &models.Log{Text: "Summarizing messages after last user prompt to reduce context length..."}
-	listener <- &models.Spin{}
-	defer func() {
-		listener <- &models.Log{Text: "Finished summarizing messages."}
-	}()
-
 	idx := lastUserPromptIndex(allMessages)
 	if idx == -1 {
 		return nil, fmt.Errorf("no user prompt found in messages")
 	}
-
-	summary, err := summarizeMessagesWithPrompt(ctx, model, allMessages, consts.SummarizerAfterLastUserPrompt, listener)
+	summary, err := summarizeMessagesWithPrompt(ctx, model, allMessages,
+		consts.SummarizerAfterLastUserPrompt,
+		"Summarizing messages after last user prompt to reduce context length...",
+		"Finished summarizing messages.",
+		listener)
 	if err != nil {
 		return nil, err
 	}
 	// Build a fresh slice rather than appending onto a subslice of allMessages.
-	messages := make([]models.Message, 0, idx+2)
-	messages = append(messages, allMessages[:idx+1]...)
-	messages = append(messages, summary)
-	return messages, nil
+	return append(slices.Clone(allMessages[:idx+1]), summary), nil
 }
 
 func compactMessages(ctx context.Context, model llm.Model, allMessages []models.Message, instructions string, listener chan<- models.Event) ([]models.Message, error) {
-	listener <- &models.Log{Text: "Compacting conversation messages..."}
-	listener <- &models.Spin{}
-	defer func() {
-		listener <- &models.Log{Text: "Finished compacting messages."}
-	}()
-
 	prompt := consts.SummarizerCompact
 	if instructions != "" {
 		prompt += "\n\n# CALLER COMPACTION INSTRUCTIONS\nThe agent requested special focus for this compaction (follow these unless they conflict with accuracy rules or would drop critical constraints/resumption state):\n" + instructions
 	}
-
-	summary, err := summarizeMessagesWithPrompt(ctx, model, allMessages, prompt, listener)
+	summary, err := summarizeMessagesWithPrompt(ctx, model, allMessages,
+		prompt,
+		"Compacting conversation messages...",
+		"Finished compacting messages.",
+		listener)
 	if err != nil {
 		return nil, err
 	}
-
 	// Preserve the latest user prompt (if present) followed by the compacted summary.
 	if idx := lastUserPromptIndex(allMessages); idx != -1 {
 		return []models.Message{allMessages[idx], summary}, nil
@@ -452,32 +382,32 @@ func lastUserPromptIndex(messages []models.Message) int {
 	return -1
 }
 
-func summarizeMessagesWithPrompt(ctx context.Context, model llm.Model, messages []models.Message, summaryPrompt string, listener chan<- models.Event) (*models.Summary, error) {
+func summarizeMessagesWithPrompt(
+	ctx context.Context,
+	model llm.Model,
+	messages []models.Message,
+	summaryPrompt, startLog, endLog string,
+	listener chan<- models.Event,
+) (*models.Summary, error) {
+	listener <- &models.Log{Text: startLog}
+	listener <- &models.Spin{}
+	defer func() {
+		listener <- &models.Log{Text: endLog}
+	}()
+
 	// Copy messages before appending the summarization prompt to avoid mutating the caller's backing array.
-	request := make([]models.Message, 0, len(messages)+1)
-	request = append(request, messages...)
-	request = append(request, &models.UserPrompt{Text: summaryPrompt})
-	summaryEvents := model.GenerateStream(ctx, nil, nil, request)
+	request := append(slices.Clone(messages), &models.UserPrompt{Text: summaryPrompt})
 	var sb strings.Builder
-	for e := range summaryEvents {
+	for e := range model.GenerateStream(ctx, nil, nil, request) {
 		switch ev := e.(type) {
 		case *models.OutputText:
 			listener <- ev
 			sb.WriteString(ev.Text)
-		case *models.TokenUsage, *models.OutputReasoning, *models.OutputUnknown:
+		case *models.TokenUsage, *models.OutputReasoning:
 			listener <- ev
 		case *models.OutputErr:
 			return nil, fmt.Errorf("error from summarization: %s", ev.Err)
 		}
 	}
 	return &models.Summary{Text: sb.String()}, nil
-}
-
-func lookupToolByName(tools []*tool.Tool, name string) (*tool.Tool, bool) {
-	for _, t := range tools {
-		if t.Name == name {
-			return t, true
-		}
-	}
-	return nil, false
 }

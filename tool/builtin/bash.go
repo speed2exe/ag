@@ -3,6 +3,7 @@ package builtin
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 
@@ -13,33 +14,30 @@ import (
 )
 
 func Bash() *tool.Tool {
-	call := func(ctx context.Context, input *models.BashInput) (*models.BashOutput, error) {
-		cmd := exec.CommandContext(ctx, "bash", "-c", input.Command)
+	return util.NewJSONTool(
+		consts.BashToolName,
+		`Runs a bash command (bash -c <cmd>).`,
+		func(ctx context.Context, input *models.BashInput) (*models.BashOutput, error) {
+			cmd := exec.CommandContext(ctx, "bash", "-c", input.Command)
 
-		var stdoutBuf, stderrBuf bytes.Buffer
-		cmd.Stdout = &stdoutBuf
-		cmd.Stderr = &stderrBuf
+			var stdoutBuf, stderrBuf bytes.Buffer
+			cmd.Stdout = &stdoutBuf
+			cmd.Stderr = &stderrBuf
 
-		execErr := cmd.Run()
-		exitCode := 0
-		if execErr != nil {
-			if exitErr, ok := execErr.(*exec.ExitError); ok {
-				exitCode = exitErr.ExitCode()
-			} else {
-				return nil, fmt.Errorf("failed to run bash command: %w", execErr)
+			exitCode := 0
+			if err := cmd.Run(); err != nil {
+				if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
+					exitCode = exitErr.ExitCode()
+				} else {
+					return nil, fmt.Errorf("failed to run bash command: %w", err)
+				}
 			}
-		}
 
-		return &models.BashOutput{
-			Stdout:   stdoutBuf.String(),
-			Stderr:   stderrBuf.String(),
-			ExitCode: exitCode,
-		}, nil
-	}
-
-	return (&util.ToolForJsonInputOutput[models.BashInput, models.BashOutput]{
-		Name:        consts.BashToolName,
-		Description: new(`Runs a bash command (bash -c <cmd>).`),
-		Call:        call,
-	}).MustCompile()
+			return &models.BashOutput{
+				Stdout:   stdoutBuf.String(),
+				Stderr:   stderrBuf.String(),
+				ExitCode: exitCode,
+			}, nil
+		},
+	)
 }

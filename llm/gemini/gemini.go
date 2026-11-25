@@ -22,7 +22,7 @@ type Client struct {
 	thoughts sync.Map // callID (string) -> []interactions.Step
 }
 
-func New(log func(string), s *setting.Settings) (*Client, error) {
+func New(s *setting.Settings) (*Client, error) {
 	client, err := genai.NewClient(context.Background(), &genai.ClientConfig{
 		APIKey:      s.GeminiApiKey,
 		HTTPOptions: genai.HTTPOptions{BaseURL: s.GeminiBaseURL},

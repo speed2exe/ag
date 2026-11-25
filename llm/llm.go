@@ -21,32 +21,14 @@ type Model interface {
 	) <-chan models.Event
 }
 
-type ToolCaller interface {
-	CallTool(ctx context.Context, toolName, args string) (string, bool, error)
-}
-
-var (
-	_ ToolCaller = (*anthropic.Client)(nil)
-	_ ToolCaller = (*openai.Client)(nil)
-	_ ToolCaller = (*gemini.Client)(nil)
-)
-
-func New(log func(msg string), s *setting.Settings) (Model, error) {
+func New(s *setting.Settings) (Model, error) {
 	switch s.LlmProvider {
 	case setting.LlmProviderAnthropic:
-		c, err := anthropic.New(log, s)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create anthropic client: %w", err)
-		}
-		return c, nil
+		return anthropic.New(s), nil
 	case setting.LlmProviderOpenAI:
-		c, err := openai.New(log, s)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create openai client: %w", err)
-		}
-		return c, nil
+		return openai.New(s), nil
 	case setting.LlmProviderGemini:
-		c, err := gemini.New(log, s)
+		c, err := gemini.New(s)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create gemini client: %w", err)
 		}
