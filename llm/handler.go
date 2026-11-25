@@ -94,7 +94,7 @@ func (ep *EventPrinter) Print(event models.Event) {
 
 	isNew := ep.prevOutputType != ep.currentOutputType
 	if isNew {
-		ep.finishPrevOutput()
+		ep.finishPrevOutput(false)
 	}
 
 	switch e := event.(type) {
@@ -164,7 +164,7 @@ func (ep *EventPrinter) FinishCurrentOutput() {
 	ep.stopSpinner()
 	ep.prevOutputType = ep.currentOutputType
 	ep.currentOutputType = nil
-	ep.finishPrevOutput()
+	ep.finishPrevOutput(true)
 }
 
 func (ep *EventPrinter) printToolResult(resultStr string) {
@@ -230,9 +230,21 @@ func (ep *EventPrinter) printToolCallResult(toolCall *models.ToolCall) {
 	}
 }
 
-func (ep *EventPrinter) finishPrevOutput() {
+func (ep *EventPrinter) finishPrevOutput(isEnd bool) {
+	// fn call without fn args
+	if ep.prevOutputType == reflect.TypeFor[*models.OutputFnCall]() {
+		if ep.currentOutputType != reflect.TypeFor[*models.OutputFnArgs]() {
+			ep.printer.Print("\n")
+		}
+	}
+
 	switch ep.prevOutputType {
-	case nil, reflect.TypeFor[*models.OutputFnCall]():
+	case nil:
+	case reflect.TypeFor[*models.OutputFnCall]():
+		// fn call without fn args
+		if isEnd {
+			ep.printer.Print("\n")
+		}
 	case reflect.TypeFor[*models.OutputText]():
 		text := ep.textBuf.String()
 		ep.textBuf.Reset()
