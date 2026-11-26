@@ -8,25 +8,16 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
-	"time"
 
-	"github.com/speed2exe/ag/agentsmd"
-	"github.com/speed2exe/ag/consts"
+	"github.com/speed2exe/ag/app"
 	"github.com/speed2exe/ag/core"
 	"github.com/speed2exe/ag/llm"
 	"github.com/speed2exe/ag/log"
 	"github.com/speed2exe/ag/printer"
 	"github.com/speed2exe/ag/readline"
 	"github.com/speed2exe/ag/setting"
-	"github.com/speed2exe/ag/state"
-	"github.com/speed2exe/ag/store"
 	"github.com/speed2exe/ag/tool"
-	"github.com/speed2exe/ag/tool/a2a"
-	"github.com/speed2exe/ag/tool/builtin"
-	"github.com/speed2exe/ag/tool/mcp"
-	"github.com/speed2exe/ag/tool/skill"
 	"github.com/speed2exe/ag/util"
 )
 
@@ -47,63 +38,19 @@ func mainErr(ctx context.Context, p *printer.Printer) error {
 		return fmt.Errorf("failed to parse arguments: %w. \nUse -h/--help for usage", err)
 	}
 
-	if settings.LoggingEnabled {
-		if err := log.Init(settings.LogFilePath); err != nil {
-			return fmt.Errorf("failed to initialize log: %w", err)
-		}
-	}
-
-	go removeOldContexts(settings.ContextDir, settings.ContextTtl)
-
-	model, err := llm.New(settings)
+	rt, ctx, err := app.Init(ctx, p, settings)
 	if err != nil {
-		return fmt.Errorf("failed to initialize LLM client: %w", err)
+		return err
 	}
-	skills := skill.New(settings, p.Log)
-	a2aClients := a2a.New(ctx, p.Log, settings.A2aUrls)
-	defer a2aClients.Close()
-	toolsByName := buildTools(ctx, p, settings, a2aClients)
+	defer rt.Close()
 
-	ctx = state.WithState(ctx, &state.State{
-		Printer:     p,
-		Settings:    settings,
-		ToolsByName: toolsByName,
-		Skills:      skills,
-		A2a:         a2aClients,
-		Llm:         model,
-		CtxStore:    store.NewCtxStore(settings.ContextDir),
-	})
-
-	tools := util.ToolSortedListFromMap(toolsByName)
-	instructions := buildInstructions(p, settings, skills, a2aClients)
 	eventPrinter := llm.NewEventPrinter(p)
 	if setting.StdinIsTerm {
-		runInteractive(ctx, p, eventPrinter, settings, model, tools, instructions)
+		runInteractive(ctx, p, eventPrinter, settings, rt.Model, rt.Tools, rt.Instructions)
 	} else {
-		processPrompt(ctx, p, eventPrinter, model, tools, instructions, settings.ContextId, settings.UserInput)
+		processPrompt(ctx, p, eventPrinter, rt.Model, rt.Tools, rt.Instructions, settings.ContextId, settings.UserInput)
 	}
 	return nil
-}
-
-func buildTools(ctx context.Context, p *printer.Printer, s *setting.Settings, a2aClients *a2a.Clients) map[string]*tool.Tool {
-	res := map[string]*tool.Tool{
-		consts.BashToolName:    builtin.Bash(),
-		consts.AgentToolName:   builtin.Agent(),
-		consts.LuaToolName:     builtin.Lua(),
-		consts.CompactToolName: builtin.Compact(),
-	}
-	addTools := func(tools []*tool.Tool) {
-		for _, t := range tools {
-			if _, exists := res[t.Name]; exists {
-				p.Log(fmt.Sprintf("warning: tool %s already exists, skipping\n", t.Name))
-				continue
-			}
-			res[t.Name] = t
-		}
-	}
-	addTools(mcp.LoadTools(ctx, p.Log, s.McpConfPaths))
-	addTools(a2aClients.Tools())
-	return res
 }
 
 func runInteractive(
@@ -219,57 +166,5 @@ func getUserPrompt() (string, error) {
 		}
 		sb.WriteString(line)
 		return sb.String(), nil
-	}
-}
-
-func buildInstructions(p *printer.Printer, settings *setting.Settings, skills *skill.Skills, a2aClients *a2a.Clients) []string {
-	var instructions []string
-	if content := loadInstructionFile(p, settings.InstructionPath); content != "" {
-		instructions = append(instructions, content)
-	}
-	if s := agentsmd.Load(p.Log, "."); s != "" {
-		instructions = append(instructions, s)
-	}
-	instructions = append(instructions, skills.BuildInstructions()...)
-	if s := a2aClients.BuildInstructions(); s != "" {
-		instructions = append(instructions, s)
-	}
-	return instructions
-}
-
-func loadInstructionFile(p *printer.Printer, path string) string {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		log.Warnf("load instructions from %s error: %s", path, err.Error())
-		return ""
-	}
-	p.Log(fmt.Sprintf("loaded %s\n", path))
-	return strings.TrimSpace(string(data))
-}
-
-func removeOldContexts(contextDir string, contextTtl time.Duration) {
-	deadline := time.Now().Add(-contextTtl)
-	files, err := os.ReadDir(contextDir)
-	if err != nil {
-		log.Warnf("failed to remove old contexts: failed to read context dir %s: %v", contextDir, err)
-		return
-	}
-	for _, file := range files {
-		if !file.IsDir() {
-			continue
-		}
-		info, err := file.Info()
-		if err != nil {
-			log.Warnf("failed to get info for context folder %s: %v", file.Name(), err)
-			continue
-		}
-		if info.ModTime().Before(deadline) {
-			path := filepath.Join(contextDir, file.Name())
-			if err := os.RemoveAll(path); err != nil {
-				log.Warnf("failed to remove old context folder %s: %v", path, err)
-			} else {
-				log.Infof("removed old context folder %s", path)
-			}
-		}
 	}
 }

@@ -15,7 +15,7 @@ Lua).
 ### Nix
 
 ```sh
-nix-shell -p lua pkg-config readline --run 'go build'
+nix-shell -p lua pkg-config readline --run 'go build ./...'
 ```
 
 ### macOS (Homebrew)
@@ -38,16 +38,22 @@ go build ./... && go vet ./...
 CGO_ENABLED=0 go build ./... && CGO_ENABLED=0 go vet ./...
 ```
 
-- Prefer `go build ./...` (or `go build -o /tmp/ag .`) over bare `go build` so a
-  compiled `ag` binary isn't left in the repo root.
-- There are currently no `*_test.go` files in the repository; if you add tests,
-  verify them with `go test ./...`.
+- Build binaries explicitly with `go build -o /tmp/ag ./cmd/cli` and
+  `go build -o /tmp/ag-a2a ./cmd/a2a` (or `go build ./...`) so compiled binaries
+  aren't left in the repo root.
+- Run tests with `go test ./...` (and `go test -race ./...`).
 
 ## Repository Layout
 
-- `main.go` — CLI entrypoint, interactive/piped execution, session & prompt
-  history persistence, tool wiring (`buildTools`), system instruction assembly
-  (`buildInstructions`), and background context TTL cleanup.
+- `cmd/cli/` — Interactive/piped CLI entrypoint (`main.go`), session & prompt
+  history persistence.
+- `cmd/a2a/` — A2A protocol server entrypoint (`main.go`) serving JSON-RPC,
+  HTTP+JSON REST, optional gRPC, and optional v0.3 compatibility endpoints.
+- `app/` — Shared runtime initialization (`Runtime`, `Init`, `BuildTools`,
+  `BuildInstructions`, `RemoveOldContexts`) used by both `cmd/cli` and `cmd/a2a`.
+- `a2aserver/` — A2A server implementation (`Server`, `AgentExecutor`,
+  disk-backed `FileTaskStore`/`FilePushConfigStore`/`ContextMapStore`, optional
+  Bearer/API-key auth, Agent Card builder, and `a2a_request_input` tool).
 - `core/` — Streaming agentic turn loop (`GenerateStream`), tool execution,
   context recording, automatic summarization (`MaxMessagesBeforeUserPrompt` /
   `MaxMessagesAfterUserPrompt`), and on-demand compaction (`RequestCompact`).
@@ -63,7 +69,7 @@ CGO_ENABLED=0 go build ./... && CGO_ENABLED=0 go vet ./...
   - `tool/mcp/` — MCP server config loader and tool adapters (`stdio`, `http`, `sse`)
   - `tool/a2a/` — A2A client discovery and `a2a_`-prefixed tools
   - `tool/skill/` — `SKILL.md` YAML frontmatter/preload loader and instruction builder
-- `setting/` — Custom CLI flag and `AG_*` env var parser (`Init`, `StdinIsTerm`).
+- `setting/` — Custom CLI flag and `AG_*` env var parser (`Init`, `InitA2AServer`, `StdinIsTerm`).
 - `state/` — Request-scoped `context.Context` container (`Printer`, `Settings`,
   `Llm`, `ToolsByName`, `Skills`, `A2a`, `CtxStore`).
 - `store/` — On-disk context persistence (`~/.ag/contexts/<rfc3339nano>/`,
@@ -98,8 +104,8 @@ CGO_ENABLED=0 go build ./... && CGO_ENABLED=0 go vet ./...
 - **Adding a built-in tool**: Define input/output structs in `models/`, add the
   name constant in `consts/`, build it with `util.NewJSONTool` in `tool/builtin/`
   (JSON schema is derived automatically via `github.com/google/jsonschema-go/jsonschema`
-  from `json` and `jsonschema` struct tags), and register it in `buildTools` in
-  `main.go`.
+  from `json` and `jsonschema` struct tags), and register it in `BuildTools` in
+  `app/app.go`.
 - **Prompt cache determinism**: Keep tools (`util.ToolSortedListFromMap`) and
   instruction/skill lists sorted deterministically so system prompt prefixes
   stay cacheable across turns.
@@ -107,5 +113,5 @@ CGO_ENABLED=0 go build ./... && CGO_ENABLED=0 go vet ./...
   shallow-copying `state.State` with scoped `ToolsByName`/`Skills` and indenting
   `st.Printer`. Do not mutate maps on a shared parent `state.State`.
 - **Settings & CLI flags**: `setting/setting.go` uses a custom flag parser (not
-  stdlib `flag`). Register new options in `(*Settings).flagDefs()` with both a
+  stdlib `flag`). Register new options in `(*Settings).flagDefsForMode()` (or `commonFlagDefs()` / `cliFlagDefs()` / `a2aServerFlagDefs()`) with both a
   `--flag` and an `AG_*` env var (CLI flags override env vars).

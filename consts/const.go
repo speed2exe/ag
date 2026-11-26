@@ -1,10 +1,11 @@
 package consts
 
 const (
-	BashToolName    = "bash"
-	AgentToolName   = "agent"
-	LuaToolName     = "lua"
-	CompactToolName = "compact"
+	BashToolName            = "bash"
+	AgentToolName           = "agent"
+	LuaToolName             = "lua"
+	CompactToolName         = "compact"
+	A2ARequestInputToolName = "a2a_request_input"
 )
 
 // SummarizerBeforeLastUserPrompt is sent (without system instructions or tools)

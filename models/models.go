@@ -45,6 +45,16 @@ type CompactOutput struct {
 	Message   string `json:"message"`
 }
 
+type A2ARequestInputInput struct {
+	Prompt   string         `json:"prompt" jsonschema:"Clear question or instructions describing the additional input needed from the caller."`
+	Metadata map[string]any `json:"metadata,omitempty" jsonschema:"Optional structured metadata to include with the input-required status update."`
+}
+
+type A2ARequestInputOutput struct {
+	Requested bool   `json:"requested"`
+	Message   string `json:"message"`
+}
+
 type Event interface{ isEvent() }
 
 type Output interface{ isOutput() }
